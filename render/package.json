@@ -1,7 +1,7 @@
 {
   "name": "repomix-backend",
-  "version": "3.0.0",
-  "description": "Backend for Repomix with ZIP compression and binary chunked downloads",
+  "version": "5.0.0",
+  "description": "Backend for Repomix with 7z compression",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
