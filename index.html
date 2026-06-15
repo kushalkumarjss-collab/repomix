@@ -628,7 +628,6 @@ window.key = function(str) {
   if (str && str.trim()) {
     passphrase = str.trim();
     localStorage.setItem("repomix_pass", passphrase);
-    updateAuthStatus();
     console.log("✅ Authentication key saved!");
     console.log("🧪 You can now use: test() to check backend status");
     return "Key saved successfully";
