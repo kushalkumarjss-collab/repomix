@@ -390,6 +390,7 @@
         margin-left: 8px;
       }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   </head>
   <body>
     <div class="container">
@@ -512,7 +513,6 @@
         </div>
       </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script>
       // ========== CONFIGURATION ==========
       const RENDER_BACKEND_URL = "https://repomix.onrender.com";
@@ -647,7 +647,7 @@ yarn.lock
         const selectedMetadata = allFilesMetadata.filter(f => selectedFilesSet.has(f.path));
         const totalChars = selectedMetadata.reduce((sum, f) => sum + (f.size || 0), 0);
         const totalKB = (totalChars / 1024).toFixed(1);
-        const estimatedZipKB = (totalChars * 0.25 / 1024).toFixed(1); // ~75% compression
+        const estimatedZipKB = (totalChars * 0.25 / 1024).toFixed(1);
         selectionStatsSpan.innerHTML = `📊 ${selectedCount} files selected (${totalKB} KB text, ~${estimatedZipKB} KB ZIP)`;
         fileCountSpan.innerText = selectedCount;
         totalSizeSpan.innerText = totalKB;
@@ -911,6 +911,28 @@ yarn.lock
         }
       }
       
+      // ========== Helper: Convert base64 to Uint8Array ==========
+      function base64ToUint8Array(base64) {
+        const binaryString = atob(base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
+      }
+      
+      // ========== Helper: Combine Uint8Arrays ==========
+      function combineUint8Arrays(arrays) {
+        const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+        const result = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const arr of arrays) {
+          result.set(arr, offset);
+          offset += arr.length;
+        }
+        return result;
+      }
+      
       // ========== FETCH SELECTED FILES AS ZIP (HYBRID: DIRECT IF <2MB, ELSE CHUNKED) ==========
       async function fetchSelectedGitHubFiles() {
         const selectedPaths = Array.from(selectedFilesSet);
@@ -970,7 +992,7 @@ yarn.lock
             showStatus(`✅ Downloaded ${sizeMB} MB ZIP (${compressionRatio}% smaller than text!)`, "success");
             progressBar.style.display = "none";
           } else {
-            // Chunked download (ZIP >= 2MB) - decompress and display text preview
+            // Chunked download (ZIP >= 2MB)
             const data = await response.json();
             if (!data.success) {
               throw new Error(data.error);
@@ -978,13 +1000,16 @@ yarn.lock
             
             const totalChunks = data.totalChunks;
             const totalSize = data.totalSize;
-            const chunks = [data.content];
+            
+            // Store chunks as Uint8Arrays
+            const chunkArrays = [base64ToUint8Array(data.content)];
             let sessionId = data.sessionId;
+            let currentChunk = 1;
             
             showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`, "");
             
             // Download remaining chunks
-            for (let i = 1; i < totalChunks; i++) {
+            while (currentChunk < totalChunks) {
               const chunkResponse = await fetch(`${RENDER_BACKEND_URL}/api/generate-zip`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -998,7 +1023,7 @@ yarn.lock
                   showLineNumbers: showLineNumbers.checked,
                   removeComments: removeComments.checked,
                   removeEmptyLines: removeEmptyLines.checked,
-                  chunkIndex: i,
+                  chunkIndex: currentChunk,
                   sessionId: sessionId
                 })
               });
@@ -1008,46 +1033,51 @@ yarn.lock
                 throw new Error(chunkData.error);
               }
               
-              chunks.push(chunkData.content);
-              progressBar.value = (i / totalChunks) * 100;
+              chunkArrays.push(base64ToUint8Array(chunkData.content));
+              progressBar.value = (currentChunk / totalChunks) * 100;
+              currentChunk++;
               
               if (chunkData.complete) break;
             }
             
             progressBar.value = 100;
-            showStatus(`📦 Decompressing ZIP archive...`, "");
+            showStatus(`📦 Assembling ${chunkArrays.length} chunks...`, "");
             
-            // Combine base64 chunks and create ZIP blob
-            const base64String = chunks.join('');
-            const binaryString = atob(base64String);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
+            // Combine all chunks
+            const zipBytes = combineUint8Arrays(chunkArrays);
+            const zipBlob = new Blob([zipBytes], { type: 'application/zip' });
             
-            const zipBlob = new Blob([bytes], { type: 'application/zip' });
+            // Try to decompress and display preview
+            showStatus(`📖 Extracting text preview...`, "");
             
-            // Decompress ZIP and extract the text file
-            const JSZip = window.JSZip;
-            const zip = await JSZip.loadAsync(zipBlob);
-            const files = zip.files;
-            
-            // Find the text file (should be repomix_export.txt)
-            let textContent = '';
-            for (const filename in files) {
-              if (filename.endsWith('.txt')) {
-                textContent = await files[filename].async('string');
-                break;
+            try {
+              const JSZip = window.JSZip;
+              const zip = await JSZip.loadAsync(zipBlob);
+              
+              // Find the text file (should be repomix_export.txt)
+              let textContent = '';
+              for (const filename in zip.files) {
+                if (filename.endsWith('.txt') && !zip.files[filename].dir) {
+                  textContent = await zip.files[filename].async('string');
+                  break;
+                }
               }
-            }
-            
-            // Display the extracted text
-            if (textContent) {
-              outputPre.textContent = textContent;
+              
+              // Display the extracted text
+              if (textContent) {
+                outputPre.textContent = textContent;
+                outputContainer.style.display = "block";
+              } else {
+                outputPre.textContent = "No text content found in ZIP file.";
+                outputContainer.style.display = "block";
+              }
+            } catch (extractError) {
+              console.warn("Could not extract preview:", extractError);
+              outputPre.textContent = "Preview extraction failed, but ZIP file is available for download.";
               outputContainer.style.display = "block";
             }
             
-            // Also offer the ZIP download
+            // Offer the ZIP download
             const url = URL.createObjectURL(zipBlob);
             const a = document.createElement('a');
             a.href = url;
@@ -1066,7 +1096,7 @@ yarn.lock
             const sizeMB = (zipBlob.size / 1024 / 1024).toFixed(2);
             const textSizeKB = parseFloat(totalSizeSpan.innerText);
             const compressionRatio = ((1 - zipBlob.size / (textSizeKB * 1024)) * 100).toFixed(1);
-            showStatus(`✅ Extracted and displayed ${selectedPaths.length} files! ZIP saved ${compressionRatio}% bandwidth.`, "success");
+            showStatus(`✅ Extracted and displayed text! ZIP saved ${compressionRatio}% bandwidth.`, "success");
             progressBar.style.display = "none";
           }
         } catch (err) {
@@ -1226,22 +1256,7 @@ yarn.lock
           if (includeDirectoryStructure.checked) {
             content += "DIRECTORY STRUCTURE\n";
             content += "-".repeat(80) + "\n";
-            const paths = selectedPaths;
-            const root = {};
-            for (const p of paths) {
-              const parts = p.split("/");
-              let node = root;
-              for (let i = 0; i < parts.length; i++) {
-                if (i === parts.length - 1) {
-                  if (!node._files) node._files = [];
-                  node._files.push(parts[i]);
-                } else {
-                  if (!node[parts[i]]) node[parts[i]] = {};
-                  node = node[parts[i]];
-                }
-              }
-            }
-            content += "File tree would be displayed here\n\n";
+            content += "Directory structure:\n\n";
             content += "#".repeat(80) + "\n\n";
           }
           
