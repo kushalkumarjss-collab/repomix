@@ -291,60 +291,6 @@ async function generateZipContent(files, options) {
   });
 }
 
-// ========== HELPER: Stream ZIP in Chunks ==========
-async function streamZipInChunks(res, files, options, sessionId, chunkIndex, chunkSize = 2 * 1024 * 1024) {
-  const tempFilePath = path.join(TEMP_DIR, `${sessionId}.zip`);
-  
-  if (chunkIndex === 0) {
-    const zipBuffer = await generateZipContent(files, options);
-    fs.writeFileSync(tempFilePath, zipBuffer);
-    console.log(`📦 Created ZIP: ${(zipBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-  }
-  
-  if (!fs.existsSync(tempFilePath)) {
-    return res.status(400).json({ success: false, error: 'Session expired. Start from chunk 0.' });
-  }
-  
-  const stats = fs.statSync(tempFilePath);
-  const totalSize = stats.size;
-  const totalChunks = Math.ceil(totalSize / chunkSize);
-  const start = chunkIndex * chunkSize;
-  
-  if (start >= totalSize) {
-    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-    return res.json({ success: true, complete: true, chunkIndex, totalChunks, totalSize });
-  }
-  
-  const end = Math.min(start + chunkSize, totalSize);
-  const bufferLength = end - start;
-  const buffer = Buffer.alloc(bufferLength);
-  const fd = fs.openSync(tempFilePath, 'r');
-  fs.readSync(fd, buffer, 0, bufferLength, start);
-  fs.closeSync(fd);
-  
-  const isLastChunk = (end >= totalSize);
-  if (isLastChunk) {
-    fs.unlinkSync(tempFilePath);
-    console.log(`🗑️ Deleted: ${path.basename(tempFilePath)}`);
-  }
-  
-  // Convert buffer to base64 for JSON transport
-  const contentBase64 = buffer.toString('base64');
-  
-  res.json({
-    success: true,
-    complete: isLastChunk,
-    chunkIndex: chunkIndex,
-    nextChunkIndex: chunkIndex + 1,
-    totalChunks: totalChunks,
-    totalSize: totalSize,
-    chunkSize: bufferLength,
-    content: contentBase64,
-    isBase64: true,
-    sessionId: sessionId
-  });
-}
-
 // ========== STEP 1: Analyze Repo ==========
 app.post('/api/analyze', async (req, res) => {
   const { owner, repo, branch = 'main', ignorePatterns = [] } = req.body;
@@ -471,7 +417,7 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// ========== STEP 2: Generate ZIP with Hybrid Approach ==========
+// ========== STEP 2: Generate ZIP with Binary Hybrid Approach ==========
 app.post('/api/generate-zip', async (req, res) => {
   const { 
     owner, repo, branch = 'main', selectedPaths, repoId,
@@ -509,7 +455,7 @@ app.post('/api/generate-zip', async (req, res) => {
     
     console.log(`📊 ZIP Size: ${zipSizeMB.toFixed(2)} MB`);
     
-    // If ZIP is less than 2MB, send directly
+    // If ZIP is less than 2MB, send directly as binary download
     if (zipBuffer.length < 2 * 1024 * 1024) {
       console.log(`✅ Direct ZIP download (${zipSizeMB.toFixed(2)} MB < 2MB threshold)`);
       const filename = `repomix_${owner}_${repo}_${Date.now()}.zip`;
@@ -519,33 +465,29 @@ app.post('/api/generate-zip', async (req, res) => {
       return res.send(zipBuffer);
     }
     
-    // Otherwise, start chunked session
-    console.log(`📦 Starting chunked ZIP session (${zipSizeMB.toFixed(2)} MB > 2MB threshold)`);
+    // Otherwise, start chunked session - store binary file
+    console.log(`📦 Starting chunked binary session (${zipSizeMB.toFixed(2)} MB > 2MB threshold)`);
     const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.zip`);
     fs.writeFileSync(tempFilePath, zipBuffer);
     
-    // Return first chunk
+    // Return first chunk as raw binary with metadata in headers
     const chunkSize = 2 * 1024 * 1024; // 2MB chunks
     const totalChunks = Math.ceil(zipBuffer.length / chunkSize);
     const firstChunk = zipBuffer.slice(0, chunkSize);
     
-    return res.json({
-      success: true,
-      complete: false,
-      chunkIndex: 0,
-      nextChunkIndex: 1,
-      totalChunks: totalChunks,
-      totalSize: zipBuffer.length,
-      chunkSize: firstChunk.length,
-      content: firstChunk.toString('base64'),
-      isBase64: true,
-      sessionId: currentSessionId,
-      isChunked: true
-    });
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Chunk-Index', '0');
+    res.setHeader('X-Total-Chunks', totalChunks);
+    res.setHeader('X-Total-Size', zipBuffer.length);
+    res.setHeader('X-Session-Id', currentSessionId);
+    res.setHeader('X-Is-Chunked', 'true');
+    res.setHeader('X-Complete', 'false');
+    res.send(firstChunk);
+    return;
   }
   
-  // Handle subsequent chunks
-  const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.zip`);
+  // Handle subsequent chunks - send as raw binary
+  const tempFilePath = path.join(TEMP_DIR, `${sessionId}.zip`);
   if (!fs.existsSync(tempFilePath)) {
     return res.status(400).json({ success: false, error: 'Session expired. Start from chunk 0.' });
   }
@@ -558,7 +500,8 @@ app.post('/api/generate-zip', async (req, res) => {
   
   if (start >= totalSize) {
     if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-    return res.json({ success: true, complete: true, chunkIndex, totalChunks, totalSize });
+    res.setHeader('Content-Type', 'application/json');
+    return res.json({ success: true, complete: true });
   }
   
   const end = Math.min(start + chunkSize, totalSize);
@@ -574,19 +517,13 @@ app.post('/api/generate-zip', async (req, res) => {
     console.log(`🗑️ Deleted: ${path.basename(tempFilePath)}`);
   }
   
-  res.json({
-    success: true,
-    complete: isLastChunk,
-    chunkIndex: chunkIndex,
-    nextChunkIndex: chunkIndex + 1,
-    totalChunks: totalChunks,
-    totalSize: totalSize,
-    chunkSize: bufferLength,
-    content: buffer.toString('base64'),
-    isBase64: true,
-    sessionId: currentSessionId,
-    isChunked: true
-  });
+  // Send raw binary chunk with metadata in headers
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('X-Chunk-Index', chunkIndex);
+  res.setHeader('X-Total-Chunks', totalChunks);
+  res.setHeader('X-Total-Size', totalSize);
+  res.setHeader('X-Complete', isLastChunk ? 'true' : 'false');
+  res.send(buffer);
 });
 
 // Health check endpoint
@@ -661,7 +598,7 @@ app.listen(PORT, () => {
   console.log(`\n🚀 Repomix Backend running on port ${PORT}`);
   console.log(`🔧 Health: http://localhost:${PORT}/health`);
   console.log(`📊 Analyze: POST /api/analyze`);
-  console.log(`📦 Generate ZIP: POST /api/generate-zip (hybrid: direct if <2MB, else chunked)`);
+  console.log(`📦 Generate ZIP: POST /api/generate-zip (binary hybrid: direct if <2MB, else raw binary chunks)`);
   console.log(`💾 Cache: ${MAX_CACHE_SIZE} repos (LRU)`);
   console.log(`📁 Temp: ${TEMP_DIR}`);
   console.log(`🔑 Tokens: ${TOKENS.length}\n`);
