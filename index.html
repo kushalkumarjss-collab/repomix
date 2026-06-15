@@ -368,14 +368,23 @@
         margin: 0;
         font-size: 1rem;
       }
-      .copy-btn {
+      .output-actions {
+        display: flex;
+        gap: 10px;
+      }
+      .copy-btn, .download-text-btn {
         background: linear-gradient(135deg, #3b82f6, #2563eb);
         padding: 6px 14px;
         font-size: 0.8rem;
         border-radius: 8px;
         cursor: pointer;
+        border: none;
+        color: white;
       }
-      .copy-btn:hover {
+      .download-text-btn {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+      }
+      .copy-btn:hover, .download-text-btn:hover {
         transform: translateY(-1px);
         filter: brightness(1.1);
       }
@@ -388,6 +397,11 @@
         padding: 2px 8px;
         border-radius: 12px;
         margin-left: 8px;
+      }
+      .button-group {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
       }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -504,7 +518,10 @@
           <div id="outputContainer" style="margin-top: 20px; display: none">
             <div class="output-header">
               <h2>📄 Generated Output (Preview)</h2>
-              <button id="copyOutputBtn" class="copy-btn">📋 Copy</button>
+              <div class="output-actions">
+                <button id="downloadTextBtn" class="download-text-btn">📄 Download as Text</button>
+                <button id="copyOutputBtn" class="copy-btn">📋 Copy</button>
+              </div>
             </div>
             <pre id="output">—</pre>
             <div id="downloadContainer" style="text-align: center; margin-top: 12px"></div>
@@ -581,6 +598,7 @@ yarn.lock
       const downloadContainer = document.getElementById("downloadContainer");
       const progressBar = document.getElementById("progressBar");
       const copyOutputBtn = document.getElementById("copyOutputBtn");
+      const downloadTextBtn = document.getElementById("downloadTextBtn");
       const btnGithub = document.getElementById("btnGithub");
       const btnLocal = document.getElementById("btnLocal");
       const btnZip = document.getElementById("btnZip");
@@ -602,6 +620,7 @@ yarn.lock
       let currentSourceType = "github";
       let loadedContentMap = new Map();
       let isFromCache = false;
+      let currentTextContent = ""; // Store current text content for download
       
       ignoreTextarea.value = defaultIgnorePatterns;
       
@@ -652,6 +671,26 @@ yarn.lock
         fileCountSpan.innerText = selectedCount;
         totalSizeSpan.innerText = totalKB;
         estimatedZipSizeSpan.innerText = estimatedZipKB;
+      }
+      
+      // ========== Text File Download ==========
+      function downloadAsTextFile() {
+        if (!currentTextContent) {
+          showError("No text content to download");
+          return;
+        }
+        
+        const blob = new Blob([currentTextContent], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `repomix_${currentOwner || 'export'}_${currentRepo || Date.now()}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        showStatus(`✅ Downloaded text file (${(blob.size / 1024).toFixed(1)} KB)`, "success");
       }
       
       // ========== File Tree Functions ==========
@@ -812,6 +851,7 @@ yarn.lock
         expandedFolders.clear();
         fileTreeData = null;
         loadedContentMap.clear();
+        currentTextContent = "";
         analysisPanel.style.display = "none";
         fileTreeContainer.innerHTML = '<div style="color:#64748b; text-align:center; padding:40px">🔍 Enter a GitHub repo and click "Analyze Repository"</div>';
         outputContainer.style.display = "none";
@@ -911,29 +951,7 @@ yarn.lock
         }
       }
       
-      // ========== Helper: Convert base64 to Uint8Array ==========
-      function base64ToUint8Array(base64) {
-        const binaryString = atob(base64);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        return bytes;
-      }
-      
-      // ========== Helper: Combine Uint8Arrays ==========
-      function combineUint8Arrays(arrays) {
-        const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-        const result = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const arr of arrays) {
-          result.set(arr, offset);
-          offset += arr.length;
-        }
-        return result;
-      }
-      
-      // ========== FETCH SELECTED FILES AS ZIP (HYBRID: DIRECT IF <2MB, ELSE CHUNKED) ==========
+      // ========== FETCH SELECTED FILES AS ZIP (BINARY CHUNKS - NO BASE64) ==========
       async function fetchSelectedGitHubFiles() {
         const selectedPaths = Array.from(selectedFilesSet);
         if (selectedPaths.length === 0) {
@@ -991,25 +1009,26 @@ yarn.lock
             const compressionRatio = ((1 - blob.size / (textSizeKB * 1024)) * 100).toFixed(1);
             showStatus(`✅ Downloaded ${sizeMB} MB ZIP (${compressionRatio}% smaller than text!)`, "success");
             progressBar.style.display = "none";
-          } else {
-            // Chunked download (ZIP >= 2MB)
-            const data = await response.json();
-            if (!data.success) {
-              throw new Error(data.error);
-            }
+            return;
+          }
+          
+          // Chunked binary download
+          const isChunked = response.headers.get('X-Is-Chunked') === 'true';
+          
+          if (isChunked) {
+            // Get metadata from headers
+            const totalChunks = parseInt(response.headers.get('X-Total-Chunks'));
+            const totalSize = parseInt(response.headers.get('X-Total-Size'));
+            const sessionId = response.headers.get('X-Session-Id');
             
-            const totalChunks = data.totalChunks;
-            const totalSize = data.totalSize;
+            // Get first chunk as ArrayBuffer
+            const firstChunk = await response.arrayBuffer();
+            const chunks = [new Uint8Array(firstChunk)];
             
-            // Store chunks as Uint8Arrays
-            const chunkArrays = [base64ToUint8Array(data.content)];
-            let sessionId = data.sessionId;
-            let currentChunk = 1;
+            showStatus(`📥 Downloading ${totalChunks} binary chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`, "");
             
-            showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`, "");
-            
-            // Download remaining chunks
-            while (currentChunk < totalChunks) {
+            // Download remaining chunks as binary
+            for (let i = 1; i < totalChunks; i++) {
               const chunkResponse = await fetch(`${RENDER_BACKEND_URL}/api/generate-zip`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1023,38 +1042,41 @@ yarn.lock
                   showLineNumbers: showLineNumbers.checked,
                   removeComments: removeComments.checked,
                   removeEmptyLines: removeEmptyLines.checked,
-                  chunkIndex: currentChunk,
+                  chunkIndex: i,
                   sessionId: sessionId
                 })
               });
               
-              const chunkData = await chunkResponse.json();
-              if (!chunkData.success) {
-                throw new Error(chunkData.error);
+              if (!chunkResponse.ok) {
+                throw new Error(`Chunk ${i} failed: ${chunkResponse.status}`);
               }
               
-              chunkArrays.push(base64ToUint8Array(chunkData.content));
-              progressBar.value = (currentChunk / totalChunks) * 100;
-              currentChunk++;
-              
-              if (chunkData.complete) break;
+              const chunkData = await chunkResponse.arrayBuffer();
+              chunks.push(new Uint8Array(chunkData));
+              progressBar.value = (i / totalChunks) * 100;
             }
             
             progressBar.value = 100;
-            showStatus(`📦 Assembling ${chunkArrays.length} chunks...`, "");
+            showStatus(`📦 Assembling ${chunks.length} binary chunks...`, "");
             
-            // Combine all chunks
-            const zipBytes = combineUint8Arrays(chunkArrays);
+            // Combine chunks efficiently
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const zipBytes = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+              zipBytes.set(chunk, offset);
+              offset += chunk.length;
+            }
+            
             const zipBlob = new Blob([zipBytes], { type: 'application/zip' });
             
-            // Try to decompress and display preview
+            // Try to extract and display preview
             showStatus(`📖 Extracting text preview...`, "");
             
             try {
               const JSZip = window.JSZip;
               const zip = await JSZip.loadAsync(zipBlob);
               
-              // Find the text file (should be repomix_export.txt)
               let textContent = '';
               for (const filename in zip.files) {
                 if (filename.endsWith('.txt') && !zip.files[filename].dir) {
@@ -1063,21 +1085,23 @@ yarn.lock
                 }
               }
               
-              // Display the extracted text
               if (textContent) {
+                currentTextContent = textContent;
                 outputPre.textContent = textContent;
                 outputContainer.style.display = "block";
               } else {
-                outputPre.textContent = "No text content found in ZIP file.";
+                currentTextContent = "No text content found in ZIP file.";
+                outputPre.textContent = currentTextContent;
                 outputContainer.style.display = "block";
               }
             } catch (extractError) {
               console.warn("Could not extract preview:", extractError);
-              outputPre.textContent = "Preview extraction failed, but ZIP file is available for download.";
+              currentTextContent = "Preview extraction failed, but ZIP file is available for download.";
+              outputPre.textContent = currentTextContent;
               outputContainer.style.display = "block";
             }
             
-            // Offer the ZIP download
+            // Offer ZIP download
             const url = URL.createObjectURL(zipBlob);
             const a = document.createElement('a');
             a.href = url;
@@ -1288,6 +1312,9 @@ yarn.lock
           content += "END OF CODEBASE\n";
           content += "#".repeat(80) + "\n";
           
+          // Store text content for download
+          currentTextContent = content;
+          
           zip.file(`repomix_export_${Date.now()}.txt`, content);
           const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
           
@@ -1354,6 +1381,11 @@ yarn.lock
         setSourceType("zip");
         analyzeRepository();
       });
+      
+      // Text download button handler
+      downloadTextBtn.addEventListener("click", downloadAsTextFile);
+      
+      // Copy button handler
       copyOutputBtn.addEventListener("click", async () => {
         const outputText = outputPre.textContent;
         try {
@@ -1370,10 +1402,10 @@ yarn.lock
         }
       });
       
-      console.log("🚀 Repomix is ready with ZIP compression!");
+      console.log("🚀 Repomix is ready with BINARY ZIP compression (no base64 overhead!)");
       console.log(`📡 Backend URL: ${RENDER_BACKEND_URL}`);
-      console.log("✅ Hybrid ZIP: Direct if <2MB, chunked if >=2MB");
-      console.log("✅ Text preview extracted from ZIP");
+      console.log("✅ Binary chunked transfer - 33% less data than base64");
+      console.log("✅ Text preview with download button");
       console.log("✅ 75-90% file size reduction with ZIP compression");
     </script>
   </body>
