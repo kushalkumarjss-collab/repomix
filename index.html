@@ -454,9 +454,9 @@
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 </head>
 <body>
-<div class="auth-status" id="authStatus" class="unauthenticated">
+<!--<div class="auth-status" id="authStatus" class="unauthenticated">
   🔐 Unauthenticated
-</div>
+</div> -->
 <div class="container">
   <div class="header">
     <h1>📦 Repomix</h1>
@@ -478,7 +478,6 @@
             <button id="analyzeBtn" class="primary">🔍 Analyze Repository</button>
           </div>
           <div class="badge">⚡ 5-repo LRU cache with 7z compression (best for text)</div>
-          <div class="badge">🔐 Authentication required. Use: key('your_secret') in console</div>
         </div>
       </div>
       <div id="localBlock" style="display: none">
@@ -662,7 +661,7 @@ function authenticatedFetch(url, options = {}) {
 // ========== TEST FUNCTION ==========
 window.test = async function() {
   if (!passphrase) {
-    console.error("❌ No authentication key set. Use: key('your_secret_key') first");
+    console.error("❌ No authentication key");
     return { error: "No authentication key" };
   }
   
