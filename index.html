@@ -474,10 +474,9 @@
         <div class="input-group">
           <label>GitHub Repository</label>
           <div class="flex-row">
-            <input type="text" id="repoUrl" placeholder="owner/repo or full URL" value="facebook/react" />
+            <input type="text" id="repoUrl" placeholder="owner/repo or full URL" />
             <button id="analyzeBtn" class="primary">🔍 Analyze Repository</button>
           </div>
-          <div class="badge">⚡ 5-repo LRU cache with 7z compression (best for text)</div>
         </div>
       </div>
       <div id="localBlock" style="display: none">
@@ -738,7 +737,7 @@ window.test = async function() {
 };
 
 // Session viewer
-window.showSessions = async function() {
+window.sessions = async function() {
   if (!passphrase) {
     console.error("❌ No authentication key set");
     return;
@@ -1843,9 +1842,7 @@ console.log("🚀 Repomix is ready!");
 console.log(`📡 Backend URL: ${BACKEND_URL}`);
 console.log("🔐 To authenticate, use: key('your_secret_key')");
 console.log("🧪 To test backend, use: test()");
-console.log("👥 To view sessions, use: showSessions()");
-console.log("✅ Local folders and ZIP files work offline");
-console.log("✅ Generate Preview & Download ZIP work with compression");
+console.log("👥 To view sessions, use: sessions()");
 </script>
 </body>
 </html>
