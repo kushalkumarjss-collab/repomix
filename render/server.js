@@ -10,18 +10,119 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const app = express();
 
-// Middleware
+// ========== AUTHENTICATION ==========
+const SECRET_KEY = process.env.SECRET_KEY || "RepomixSecureKey2026!";
+
+// ========== SESSION MANAGEMENT ==========
+const MAX_SESSIONS = 3;
+const sessions = new Map(); // sessionId -> { createdAt, lastAccessed, tempDir }
+
+function createSession(sessionId) {
+  // If max sessions reached, remove the least recent session (by lastAccessed)
+  if (sessions.size >= MAX_SESSIONS) {
+    let oldestSessionId = null;
+    let oldestTime = Infinity;
+    
+    for (const [id, session] of sessions.entries()) {
+      if (session.lastAccessed < oldestTime) {
+        oldestTime = session.lastAccessed;
+        oldestSessionId = id;
+      }
+    }
+    
+    if (oldestSessionId) {
+      const oldSession = sessions.get(oldestSessionId);
+      console.log(`🗑️ Removing least recent session: ${oldestSessionId} (last accessed: ${new Date(oldSession.lastAccessed).toISOString()})`);
+      
+      // Delete entire session folder
+      if (fs.existsSync(oldSession.tempDir)) {
+        fs.rmSync(oldSession.tempDir, { recursive: true, force: true });
+        console.log(`📁 Deleted folder: ${oldSession.tempDir}`);
+      }
+      sessions.delete(oldestSessionId);
+    }
+  }
+  
+  // Create new session
+  const tempDir = path.join(__dirname, 'temp', sessionId);
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+  
+  const session = {
+    createdAt: Date.now(),
+    lastAccessed: Date.now(),
+    tempDir: tempDir
+  };
+  
+  sessions.set(sessionId, session);
+  console.log(`✅ Created session: ${sessionId}`);
+  console.log(`📊 Active sessions: ${sessions.size}/${MAX_SESSIONS}`);
+  
+  return session;
+}
+
+function getSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.lastAccessed = Date.now();
+    console.log(`🔄 Session accessed: ${sessionId}`);
+    return session;
+  }
+  return null;
+}
+
+// Cleanup old sessions (older than 1 hour)
+setInterval(() => {
+  const now = Date.now();
+  const oneHourAgo = now - (60 * 60 * 1000);
+  const toDelete = [];
+  
+  for (const [sessionId, session] of sessions.entries()) {
+    if (session.createdAt < oneHourAgo) {
+      toDelete.push(sessionId);
+    }
+  }
+  
+  for (const sessionId of toDelete) {
+    const session = sessions.get(sessionId);
+    console.log(`🗑️ Cleaning up old session: ${sessionId} (created ${new Date(session.createdAt).toISOString()})`);
+    
+    if (fs.existsSync(session.tempDir)) {
+      fs.rmSync(session.tempDir, { recursive: true, force: true });
+      console.log(`📁 Deleted folder: ${session.tempDir}`);
+    }
+    sessions.delete(sessionId);
+  }
+  
+  if (toDelete.length > 0) {
+    console.log(`📊 Active sessions after cleanup: ${sessions.size}/${MAX_SESSIONS}`);
+  }
+}, 60 * 60 * 1000); // Check every hour
+
+// ========== MIDDLEWARE ==========
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 
-// Create temp directory
-const TEMP_DIR = path.join(__dirname, 'temp');
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-  console.log(`📁 Created temp directory: ${TEMP_DIR}`);
+// Auth middleware
+function authenticate(req, res, next) {
+  const authKey = req.headers['x-auth-key'];
+  if (!authKey || authKey !== SECRET_KEY) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Unauthorized. Invalid or missing X-Auth-Key header' 
+    });
+  }
+  next();
 }
 
-// Check if 7z is available
+// ========== TEMP DIRECTORY (Legacy - will be replaced by session dirs) ==========
+const LEGACY_TEMP_DIR = path.join(__dirname, 'temp_legacy');
+if (!fs.existsSync(LEGACY_TEMP_DIR)) {
+  fs.mkdirSync(LEGACY_TEMP_DIR, { recursive: true });
+}
+
+// ========== CHECK 7z ==========
 let has7z = false;
 async function check7z() {
   try {
@@ -30,32 +131,12 @@ async function check7z() {
     console.log('✅ 7z compression available (best for text files)');
   } catch {
     has7z = false;
-    console.log('⚠️ 7z not found, using ZIP fallback');
+    console.log('⚠️ 7z not found, using fallback compression');
   }
 }
 check7z();
 
-// Clean up old files every hour
-setInterval(() => {
-  const now = Date.now();
-  const oneHourAgo = now - (60 * 60 * 1000);
-  fs.readdir(TEMP_DIR, (err, files) => {
-    if (err) return;
-    files.forEach(file => {
-      const filePath = path.join(TEMP_DIR, file);
-      fs.stat(filePath, (err, stats) => {
-        if (err) return;
-        if (stats.isFile() && stats.mtimeMs < oneHourAgo) {
-          fs.unlink(filePath, (err) => {
-            if (!err) console.log(`🗑️ Cleaned up: ${file}`);
-          });
-        }
-      });
-    });
-  });
-}, 60 * 60 * 1000);
-
-// Parse GitHub tokens
+// ========== GITHUB TOKENS ==========
 const TOKENS = process.env.GITHUB_TOKENS 
   ? process.env.GITHUB_TOKENS.split(',').filter(t => t.trim())
   : [];
@@ -122,9 +203,119 @@ function getFromCache(owner, repo, branch) {
   return null;
 }
 
-// ========== HELPER FUNCTIONS ==========
-function buildAsciiTree(paths) {
+// ========== BINARY DETECTION ==========
+function isBinaryContent(content) {
+  if (!content) return true;
+  if (content.indexOf("\0") !== -1) return true;
+  const binaryPattern = /[\x00-\x08\x0E-\x1F\x7F-\x9F]/;
+  if (binaryPattern.test(content.substring(0, 1000))) return true;
+  return false;
+}
+
+// ========== ENHANCED COMMENT REMOVAL ==========
+function removeCommentsFromCode(code, filePath) {
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  
+  // JavaScript/TypeScript
+  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Python
+  if (ext === "py") {
+    return code
+      .replace(/#.*$/gm, "")
+      .replace(/'''[\s\S]*?'''/g, "")
+      .replace(/"""[\s\S]*?"""/g, "");
+  }
+  
+  // HTML/XML
+  if (["html", "xml", "svg"].includes(ext)) {
+    return code.replace(/<!--[\s\S]*?-->/g, "");
+  }
+  
+  // CSS/SCSS/SASS
+  if (["css", "scss", "sass", "less"].includes(ext)) {
+    return code.replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // JSON
+  if (ext === "json") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // C/C++
+  if (["c", "cpp", "h", "hpp", "cc", "cxx"].includes(ext)) {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Java
+  if (ext === "java") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Go
+  if (ext === "go") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Rust
+  if (ext === "rs") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Ruby
+  if (ext === "rb") {
+    return code.replace(/#.*$/gm, "").replace(/=begin[\s\S]*?=end/g, "");
+  }
+  
+  // PHP
+  if (ext === "php") {
+    return code.replace(/\/\/.*$/gm, "").replace(/#.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // SQL
+  if (ext === "sql") {
+    return code.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // C#
+  if (ext === "cs") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Swift
+  if (ext === "swift") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Kotlin
+  if (ext === "kt" || ext === "kts") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  
+  // Shell scripts
+  if (["sh", "bash", "zsh", "fish"].includes(ext)) {
+    return code.replace(/#.*$/gm, "");
+  }
+  
+  // Lua
+  if (ext === "lua") {
+    return code.replace(/--.*$/gm, "").replace(/--\[\[[\s\S]*?\]\]/g, "");
+  }
+  
+  // Perl
+  if (ext === "pl" || ext === "pm") {
+    return code.replace(/#.*$/gm, "");
+  }
+  
+  return code;
+}
+
+// ========== ENHANCED ASCII TREE BUILDER ==========
+function buildAsciiTree(paths, showSizes = false, sizeMap = new Map()) {
   if (!paths.length) return "(empty)";
+  
   const root = {};
   for (const p of paths) {
     const parts = p.split("/");
@@ -133,7 +324,7 @@ function buildAsciiTree(paths) {
       const part = parts[i];
       if (i === parts.length - 1) {
         if (!node._files) node._files = [];
-        node._files.push(part);
+        node._files.push({ name: part, size: sizeMap.get(p) || 0 });
       } else {
         if (!node[part]) node[part] = {};
         node = node[part];
@@ -141,17 +332,29 @@ function buildAsciiTree(paths) {
     }
   }
   
+  function formatSize(bytes) {
+    if (bytes === 0) return "";
+    if (bytes < 1024) return ` (${bytes} B)`;
+    if (bytes < 1024 * 1024) return ` (${(bytes / 1024).toFixed(1)} KB)`;
+    return ` (${(bytes / (1024 * 1024)).toFixed(1)} MB)`;
+  }
+  
   function renderNode(node, prefix = "") {
     let lines = [];
     const dirs = Object.keys(node).filter(k => k !== "_files").sort();
-    const files = node._files ? [...node._files].sort() : [];
-    const items = [...dirs.map(d => ({ type: "dir", name: d })), ...files.map(f => ({ type: "file", name: f }))];
+    const files = node._files ? [...node._files].sort((a, b) => a.name.localeCompare(b.name)) : [];
+    const items = [
+      ...dirs.map(d => ({ type: "dir", name: d, size: 0 })),
+      ...files.map(f => ({ type: "file", name: f.name, size: f.size }))
+    ];
     
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const isLast = i === items.length - 1;
       const connector = isLast ? "└── " : "├── ";
-      lines.push(`${prefix}${connector}${item.name}${item.type === "dir" ? "/" : ""}`);
+      const sizeDisplay = showSizes && item.size > 0 ? formatSize(item.size) : "";
+      lines.push(`${prefix}${connector}${item.name}${item.type === "dir" ? "/" : ""}${sizeDisplay}`);
+      
       if (item.type === "dir") {
         const childPrefix = prefix + (isLast ? "    " : "│   ");
         const childLines = renderNode(node[item.name], childPrefix);
@@ -162,10 +365,13 @@ function buildAsciiTree(paths) {
   }
   
   const rootDirs = Object.keys(root).filter(k => k !== "_files").sort();
-  const rootFiles = root._files ? [...root._files].sort() : [];
-  const rootItems = [...rootDirs.map(d => ({ type: "dir", name: d })), ...rootFiles.map(f => ({ type: "file", name: f }))];
-  let result = [];
+  const rootFiles = root._files ? [...root._files].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  const rootItems = [
+    ...rootDirs.map(d => ({ type: "dir", name: d })),
+    ...rootFiles.map(f => ({ type: "file", name: f.name }))
+  ];
   
+  let result = [];
   for (let i = 0; i < rootItems.length; i++) {
     const item = rootItems[i];
     const isLast = i === rootItems.length - 1;
@@ -180,20 +386,8 @@ function buildAsciiTree(paths) {
   return result.join("\n");
 }
 
-function removeCommentsFromCode(code, filePath) {
-  const ext = filePath.split(".").pop()?.toLowerCase();
-  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
-    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-  }
-  if (ext === "py") {
-    return code.replace(/#.*$/gm, "").replace(/'''[\s\S]*?'''/g, "").replace(/"""[\s\S]*?"""/g, "");
-  }
-  if (ext === "html") return code.replace(/<!--[\s\S]*?-->/g, "");
-  if (ext === "css") return code.replace(/\/\*[\s\S]*?\*\//g, "");
-  return code;
-}
-
-function generateTextContent(files, includeDirStructure, showLineNumbers, removeComments, removeEmptyLines) {
+// ========== TEXT CONTENT GENERATION ==========
+function generateTextContent(files, includeDirStructure, showLineNumbers, removeCommentsFlag, removeEmptyLines, sizeMap = new Map()) {
   let output = "";
   output += "#".repeat(80) + "\n";
   output += `REPOMIX EXPORT\n`;
@@ -206,7 +400,7 @@ function generateTextContent(files, includeDirStructure, showLineNumbers, remove
     const paths = Object.keys(files);
     output += "DIRECTORY STRUCTURE\n";
     output += "-".repeat(80) + "\n";
-    output += buildAsciiTree(paths) + "\n\n";
+    output += buildAsciiTree(paths, true, sizeMap) + "\n\n";
     output += "#".repeat(80) + "\n\n";
   }
   
@@ -214,10 +408,14 @@ function generateTextContent(files, includeDirStructure, showLineNumbers, remove
     output += `\n${"#".repeat(80)}\n`;
     output += `File: ${filePath}\n`;
     output += `${"#".repeat(80)}\n\n`;
-    
     let processedContent = content || "";
-    if (removeComments) processedContent = removeCommentsFromCode(processedContent, filePath);
-    if (removeEmptyLines) processedContent = processedContent.split("\n").filter(l => l.trim().length > 0).join("\n");
+    
+    if (removeCommentsFlag) {
+      processedContent = removeCommentsFromCode(processedContent, filePath);
+    }
+    if (removeEmptyLines) {
+      processedContent = processedContent.split("\n").filter(l => l.trim().length > 0).join("\n");
+    }
     if (showLineNumbers) {
       const lines = processedContent.split("\n");
       const maxLineNum = Math.max(lines.length, 1).toString().length;
@@ -235,22 +433,24 @@ function generateTextContent(files, includeDirStructure, showLineNumbers, remove
   return output;
 }
 
-// ========== Generate 7z Archive ==========
-async function generate7zArchive(textContent, sessionId) {
-  const tempTextFile = path.join(TEMP_DIR, `${sessionId}.txt`);
-  const tempArchiveFile = path.join(TEMP_DIR, `${sessionId}.7z`);
+// ========== COMPRESSION ==========
+async function generateCompressedArchive(textContent, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
   
+  const tempTextFile = path.join(session.tempDir, `content.txt`);
+  const tempArchiveFile = path.join(session.tempDir, `archive.7z`);
   fs.writeFileSync(tempTextFile, textContent, 'utf-8');
   
   if (has7z) {
-    // Maximum compression for text
     await execPromise(`7z a -t7z -mx=9 -mfb=273 -ms=on "${tempArchiveFile}" "${tempTextFile}"`);
     const data = fs.readFileSync(tempArchiveFile);
     fs.unlinkSync(tempTextFile);
     if (fs.existsSync(tempArchiveFile)) fs.unlinkSync(tempArchiveFile);
     return data;
   } else {
-    // Fallback to simple compression
     const zlib = require('zlib');
     const compressed = zlib.gzipSync(textContent);
     fs.unlinkSync(tempTextFile);
@@ -258,53 +458,150 @@ async function generate7zArchive(textContent, sessionId) {
   }
 }
 
-// ========== Generate ZIP Archive ==========
-async function generateZipArchive(files, options) {
+// ========== ZIP GENERATION ==========
+async function generateZipArchive(files, options, sizeMap = new Map(), sessionId) {
   return new Promise((resolve, reject) => {
     const archiver = require('archiver');
     const chunks = [];
     const archive = archiver('zip', { zlib: { level: 9 } });
-    
     archive.on('data', chunk => chunks.push(chunk));
     archive.on('end', () => resolve(Buffer.concat(chunks)));
     archive.on('error', reject);
     
-    // Add directory structure file if requested
     if (options.includeDirStructure) {
       const filePaths = Object.keys(files);
-      const structure = buildAsciiTree(filePaths);
+      const structure = buildAsciiTree(filePaths, true, sizeMap);
       const structureContent = `Directory Structure:\n${'-'.repeat(80)}\n${structure}`;
       archive.append(structureContent, { name: '_directory_structure.txt' });
     }
     
-    // Add each actual file
     for (const [filePath, content] of Object.entries(files)) {
       let processedContent = content || "";
-      
       if (options.removeComments) {
         processedContent = removeCommentsFromCode(processedContent, filePath);
       }
       if (options.removeEmptyLines) {
-        processedContent = processedContent.split("\n")
-          .filter(l => l.trim().length > 0)
-          .join("\n");
+        processedContent = processedContent.split("\n").filter(l => l.trim().length > 0).join("\n");
       }
-      
       archive.append(processedContent, { name: filePath });
     }
-    
     archive.finalize();
   });
 }
 
-// ========== ANALYZE ENDPOINT ==========
-app.post('/api/analyze', async (req, res) => {
-  const { owner, repo, branch = 'main', ignorePatterns = [] } = req.body;
+// ========== TEST ENDPOINT ==========
+app.get('/test', authenticate, async (req, res) => {
+  try {
+    const token = getNextToken();
+    const results = [];
+    
+    // Test unauthenticated rate limit
+    try {
+      const freeResponse = await fetch("https://api.github.com/rate_limit", {
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "Repomix-Backend"
+        }
+      });
+      
+      if (freeResponse.ok) {
+        const data = await freeResponse.json();
+        results.push({ 
+          type: "FREE", 
+          remaining: data.resources.core.remaining,
+          limit: data.resources.core.limit
+        });
+      } else {
+        results.push({ type: "FREE", remaining: 0, error: `HTTP ${freeResponse.status}` });
+      }
+    } catch (err) {
+      results.push({ type: "FREE", remaining: 0, error: err.message });
+    }
+    
+    // Test each token
+    for (let i = 0; i < TOKENS.length; i++) {
+      const token = TOKENS[i];
+      const maskedToken = token.slice(0, 8) + "...." + token.slice(-4);
+      
+      try {
+        const response = await fetch("https://api.github.com/rate_limit", {
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Repomix-Backend"
+          }
+        });
+        
+        if (!response.ok) {
+          results.push({ 
+            token: maskedToken, 
+            status: "❌ Invalid/Revoked", 
+            remaining: 0,
+            limit: 0
+          });
+          continue;
+        }
+        
+        const data = await response.json();
+        results.push({
+          token: maskedToken,
+          status: data.resources.core.remaining > 0 ? "✅ Working" : "⚠️ Rate Limited",
+          remaining: data.resources.core.remaining,
+          limit: data.resources.core.limit,
+          used: data.resources.core.used
+        });
+      } catch (err) {
+        results.push({ token: maskedToken, status: "❌ Error", remaining: 0, error: err.message });
+      }
+    }
+    
+    const sessionInfo = {
+      activeSessions: sessions.size,
+      maxSessions: MAX_SESSIONS,
+      sessions: Array.from(sessions.entries()).map(([id, session]) => ({
+        id: id,
+        createdAt: new Date(session.createdAt).toISOString(),
+        lastAccessed: new Date(session.lastAccessed).toISOString(),
+        ageMinutes: ((Date.now() - session.createdAt) / 60000).toFixed(1)
+      }))
+    };
+    
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      tokens: results,
+      anonymousFree: results.find(r => r.type === "FREE")?.remaining || 0,
+      sessions: sessionInfo,
+      cacheSize: repoCache.size,
+      compression: has7z ? "7z" : "fallback"
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ========== ANALYZE ENDPOINT (with session) ==========
+app.post('/api/analyze', authenticate, async (req, res) => {
+  const { owner, repo, branch = 'main', ignorePatterns = [], sessionId } = req.body;
   if (!owner || !repo) {
     return res.status(400).json({ success: false, error: 'Missing owner or repo' });
   }
   
-  console.log(`\n📊 Analyzing: ${owner}/${repo}`);
+  // Create or get session
+  let currentSessionId = sessionId;
+  if (!currentSessionId) {
+    currentSessionId = crypto.randomBytes(16).toString('hex');
+    createSession(currentSessionId);
+  } else {
+    const session = getSession(currentSessionId);
+    if (!session) {
+      // Session expired or doesn't exist, create new one
+      currentSessionId = crypto.randomBytes(16).toString('hex');
+      createSession(currentSessionId);
+    }
+  }
+  
+  console.log(`\n📊 Analyzing: ${owner}/${repo} (Session: ${currentSessionId})`);
   
   try {
     const cached = getFromCache(owner, repo, branch);
@@ -315,7 +612,7 @@ app.post('/api/analyze', async (req, res) => {
         const shouldIgnore = ignorePatterns.some(pattern => 
           filePath.toLowerCase().includes(pattern.toLowerCase())
         );
-        if (!shouldIgnore) {
+        if (!shouldIgnore && !isBinaryContent(cached.fileContents[filePath] || "")) {
           filteredTree[filePath] = size;
           totalSize += size;
         }
@@ -327,7 +624,8 @@ app.post('/api/analyze', async (req, res) => {
         fileTree: filteredTree,
         totalSize: totalSize,
         totalFiles: Object.keys(filteredTree).length,
-        totalSizeKB: (totalSize / 1024).toFixed(1)
+        totalSizeKB: (totalSize / 1024).toFixed(1),
+        sessionId: currentSessionId
       });
     }
     
@@ -341,16 +639,13 @@ app.post('/api/analyze', async (req, res) => {
     const repoInfoUrl = `https://api.github.com/repos/${owner}/${repo}`;
     const repoInfoResponse = await fetch(repoInfoUrl, { headers });
     if (!repoInfoResponse.ok) throw new Error(`GitHub API error: ${repoInfoResponse.status}`);
-    
     const repoInfo = await repoInfoResponse.json();
     const repoId = repoInfo.id;
     const actualBranch = branch === 'main' ? (repoInfo.default_branch || 'main') : branch;
     const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/${actualBranch}`;
-    
     console.log(`⬇️ Downloading: ${zipUrl}`);
     const zipResponse = await fetch(zipUrl, { headers, redirect: 'follow' });
     if (!zipResponse.ok) throw new Error(`Download failed: ${zipResponse.status}`);
-    
     const zipBuffer = await zipResponse.buffer();
     console.log(`✅ Downloaded ${(zipBuffer.length / 1024 / 1024).toFixed(2)} MB`);
     
@@ -376,7 +671,12 @@ app.post('/api/analyze', async (req, res) => {
       fileTree[originalPath] = size;
       totalSize += size;
       try {
-        fileContents[originalPath] = entry.getData().toString('utf-8');
+        const content = entry.getData().toString('utf-8');
+        if (!isBinaryContent(content)) {
+          fileContents[originalPath] = content;
+        } else {
+          fileContents[originalPath] = `[Binary file - ${size} bytes]`;
+        }
       } catch (err) {
         fileContents[originalPath] = `[Binary file - ${size} bytes]`;
       }
@@ -390,7 +690,7 @@ app.post('/api/analyze', async (req, res) => {
       const shouldIgnore = ignorePatterns.some(pattern => 
         filePath.toLowerCase().includes(pattern.toLowerCase())
       );
-      if (!shouldIgnore) {
+      if (!shouldIgnore && !isBinaryContent(fileContents[filePath] || "")) {
         filteredTree[filePath] = size;
         filteredSize += size;
       }
@@ -403,7 +703,8 @@ app.post('/api/analyze', async (req, res) => {
       fileTree: filteredTree,
       totalSize: filteredSize,
       totalFiles: Object.keys(filteredTree).length,
-      totalSizeKB: (filteredSize / 1024).toFixed(1)
+      totalSizeKB: (filteredSize / 1024).toFixed(1),
+      sessionId: currentSessionId
     });
   } catch (error) {
     console.error(`❌ Analysis error: ${error.message}`);
@@ -411,17 +712,30 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// ========== GENERATE 7z TEXT PREVIEW (Chunked) ==========
-app.post('/api/generate-text', async (req, res) => {
+// ========== GENERATE TEXT (with session) ==========
+app.post('/api/generate-text', authenticate, async (req, res) => {
   const { 
     owner, repo, branch = 'main', selectedPaths, repoId,
     includeDirStructure = true, showLineNumbers = false,
-    removeComments = false, removeEmptyLines = false,
+    removeComments: removeCommentsFlag = false, removeEmptyLines = false,
     chunkIndex = 0, sessionId = null
   } = req.body;
   
   if (!owner || !repo || !selectedPaths || !selectedPaths.length) {
     return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+  
+  // Verify session
+  let currentSessionId = sessionId;
+  if (!currentSessionId) {
+    currentSessionId = crypto.randomBytes(16).toString('hex');
+    createSession(currentSessionId);
+  } else {
+    const session = getSession(currentSessionId);
+    if (!session) {
+      currentSessionId = crypto.randomBytes(16).toString('hex');
+      createSession(currentSessionId);
+    }
   }
   
   const cached = getFromCache(owner, repo, branch);
@@ -432,27 +746,35 @@ app.post('/api/generate-text', async (req, res) => {
     });
   }
   
-  const currentSessionId = sessionId || `${owner}_${repo}_${repoId}_${crypto.randomBytes(4).toString('hex')}`;
-  const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.7z`);
-  const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+  const session = getSession(currentSessionId);
+  if (!session) {
+    return res.status(400).json({ success: false, error: 'Session invalid' });
+  }
   
-  // First chunk - generate 7z archive
+  const tempFilePath = path.join(session.tempDir, `output.7z`);
+  const chunkSize = 2 * 1024 * 1024;
+  
   if (chunkIndex === 0) {
     const selectedFiles = {};
+    const sizeMap = new Map();
     for (const filePath of selectedPaths) {
-      selectedFiles[filePath] = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
+      const content = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
+      if (!isBinaryContent(content)) {
+        selectedFiles[filePath] = content;
+        sizeMap.set(filePath, content.length);
+      } else {
+        selectedFiles[filePath] = `[Binary file skipped: ${filePath}]`;
+        sizeMap.set(filePath, 0);
+      }
     }
     
-    const textContent = generateTextContent(selectedFiles, includeDirStructure, showLineNumbers, removeComments, removeEmptyLines);
+    const textContent = generateTextContent(selectedFiles, includeDirStructure, showLineNumbers, removeCommentsFlag, removeEmptyLines, sizeMap);
     console.log(`📦 Generating 7z archive for ${selectedPaths.length} files...`);
-    
-    const archiveData = await generate7zArchive(textContent, currentSessionId);
+    const archiveData = await generateCompressedArchive(textContent, currentSessionId);
     fs.writeFileSync(tempFilePath, archiveData);
-    
     const totalSize = archiveData.length;
     const totalChunks = Math.ceil(totalSize / chunkSize);
     const firstChunk = archiveData.slice(0, chunkSize);
-    
     console.log(`📊 7z Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB, ${totalChunks} chunks`);
     
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -466,16 +788,14 @@ app.post('/api/generate-text', async (req, res) => {
     return;
   }
   
-  // Subsequent chunks
   if (!fs.existsSync(tempFilePath)) {
-    return res.status(400).json({ success: false, error: 'Session expired' });
+    return res.status(400).json({ success: false, error: 'Session expired or file not found' });
   }
   
   const stats = fs.statSync(tempFilePath);
   const totalSize = stats.size;
   const totalChunks = Math.ceil(totalSize / chunkSize);
   const start = chunkIndex * chunkSize;
-  
   if (start >= totalSize) {
     fs.unlinkSync(tempFilePath);
     return res.json({ success: true, complete: true });
@@ -486,7 +806,6 @@ app.post('/api/generate-text', async (req, res) => {
   const fd = fs.openSync(tempFilePath, 'r');
   fs.readSync(fd, buffer, 0, buffer.length, start);
   fs.closeSync(fd);
-  
   const isLastChunk = (end >= totalSize);
   if (isLastChunk) fs.unlinkSync(tempFilePath);
   
@@ -498,17 +817,30 @@ app.post('/api/generate-text', async (req, res) => {
   res.send(buffer);
 });
 
-// ========== GENERATE ZIP DOWNLOAD (Chunked) ==========
-app.post('/api/generate-zip', async (req, res) => {
+// ========== GENERATE ZIP (with session) ==========
+app.post('/api/generate-zip', authenticate, async (req, res) => {
   const { 
     owner, repo, branch = 'main', selectedPaths, repoId,
     includeDirStructure = true, showLineNumbers = false,
-    removeComments = false, removeEmptyLines = false,
+    removeComments: removeCommentsFlag = false, removeEmptyLines = false,
     chunkIndex = 0, sessionId = null
   } = req.body;
   
   if (!owner || !repo || !selectedPaths || !selectedPaths.length) {
     return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+  
+  // Verify session
+  let currentSessionId = sessionId;
+  if (!currentSessionId) {
+    currentSessionId = crypto.randomBytes(16).toString('hex');
+    createSession(currentSessionId);
+  } else {
+    const session = getSession(currentSessionId);
+    if (!session) {
+      currentSessionId = crypto.randomBytes(16).toString('hex');
+      createSession(currentSessionId);
+    }
   }
   
   const cached = getFromCache(owner, repo, branch);
@@ -519,27 +851,35 @@ app.post('/api/generate-zip', async (req, res) => {
     });
   }
   
-  const currentSessionId = sessionId || `${owner}_${repo}_${repoId}_${crypto.randomBytes(4).toString('hex')}`;
-  const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.zip`);
-  const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+  const session = getSession(currentSessionId);
+  if (!session) {
+    return res.status(400).json({ success: false, error: 'Session invalid' });
+  }
   
-  // First chunk - generate ZIP archive
+  const tempFilePath = path.join(session.tempDir, `output.zip`);
+  const chunkSize = 2 * 1024 * 1024;
+  
   if (chunkIndex === 0) {
     const selectedFiles = {};
+    const sizeMap = new Map();
     for (const filePath of selectedPaths) {
-      selectedFiles[filePath] = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
+      const content = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
+      if (!isBinaryContent(content)) {
+        selectedFiles[filePath] = content;
+        sizeMap.set(filePath, content.length);
+      } else {
+        selectedFiles[filePath] = `[Binary file skipped: ${filePath}]`;
+        sizeMap.set(filePath, 0);
+      }
     }
     
-    const options = { includeDirStructure, showLineNumbers, removeComments, removeEmptyLines };
+    const options = { includeDirStructure, showLineNumbers, removeComments: removeCommentsFlag, removeEmptyLines };
     console.log(`📦 Generating ZIP archive for ${selectedPaths.length} files...`);
-    
-    const archiveData = await generateZipArchive(selectedFiles, options);
+    const archiveData = await generateZipArchive(selectedFiles, options, sizeMap, currentSessionId);
     fs.writeFileSync(tempFilePath, archiveData);
-    
     const totalSize = archiveData.length;
     const totalChunks = Math.ceil(totalSize / chunkSize);
     const firstChunk = archiveData.slice(0, chunkSize);
-    
     console.log(`📊 ZIP Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB, ${totalChunks} chunks`);
     
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -552,16 +892,14 @@ app.post('/api/generate-zip', async (req, res) => {
     return;
   }
   
-  // Subsequent chunks
   if (!fs.existsSync(tempFilePath)) {
-    return res.status(400).json({ success: false, error: 'Session expired' });
+    return res.status(400).json({ success: false, error: 'Session expired or file not found' });
   }
   
   const stats = fs.statSync(tempFilePath);
   const totalSize = stats.size;
   const totalChunks = Math.ceil(totalSize / chunkSize);
   const start = chunkIndex * chunkSize;
-  
   if (start >= totalSize) {
     fs.unlinkSync(tempFilePath);
     return res.json({ success: true, complete: true });
@@ -572,7 +910,6 @@ app.post('/api/generate-zip', async (req, res) => {
   const fd = fs.openSync(tempFilePath, 'r');
   fs.readSync(fd, buffer, 0, buffer.length, start);
   fs.closeSync(fd);
-  
   const isLastChunk = (end >= totalSize);
   if (isLastChunk) fs.unlinkSync(tempFilePath);
   
@@ -584,20 +921,26 @@ app.post('/api/generate-zip', async (req, res) => {
   res.send(buffer);
 });
 
-// Health check
+// ========== HEALTH CHECK ==========
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'alive', 
     compression: has7z ? '7z' : 'fallback',
-    cacheSize: repoCache.size 
+    cacheSize: repoCache.size,
+    auth: true,
+    sessions: sessions.size,
+    maxSessions: MAX_SESSIONS
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Repomix Backend running on port ${PORT}`);
+  console.log(`🔐 Authentication: ${SECRET_KEY ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`👥 Max concurrent sessions: ${MAX_SESSIONS}`);
   console.log(`🗜️ Compression: ${has7z ? '7z (best for text)' : 'Fallback mode'}`);
-  console.log(`📊 Analyze: POST /api/analyze`);
-  console.log(`📄 Text Preview: POST /api/generate-text (returns 7z compressed chunks)`);
-  console.log(`📦 ZIP Download: POST /api/generate-zip (returns ZIP compressed chunks)\n`);
+  console.log(`📊 Analyze: POST /api/analyze (requires X-Auth-Key header)`);
+  console.log(`📄 Text Preview: POST /api/generate-text (requires X-Auth-Key header)`);
+  console.log(`📦 ZIP Download: POST /api/generate-zip (requires X-Auth-Key header)`);
+  console.log(`🧪 Test endpoint: GET /test (requires X-Auth-Key header)\n`);
 });
