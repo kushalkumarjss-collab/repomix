@@ -502,7 +502,7 @@
           <div id="statusMsg" class="status"></div>
           <div id="outputContainer" style="margin-top: 20px; display: none">
             <div class="output-header">
-              <h2>📄 Generated Output</h2>
+              <h2>📄 Generated Output (Preview)</h2>
               <button id="copyOutputBtn" class="copy-btn">📋 Copy</button>
             </div>
             <pre id="output">—</pre>
@@ -512,6 +512,7 @@
         </div>
       </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script>
       // ========== CONFIGURATION ==========
       const RENDER_BACKEND_URL = "https://repomix.onrender.com";
@@ -925,7 +926,6 @@ yarn.lock
         progressBar.value = 0;
         
         try {
-          // First request to check if direct or chunked
           const response = await fetch(`${RENDER_BACKEND_URL}/api/generate-zip`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -970,7 +970,7 @@ yarn.lock
             showStatus(`✅ Downloaded ${sizeMB} MB ZIP (${compressionRatio}% smaller than text!)`, "success");
             progressBar.style.display = "none";
           } else {
-            // Chunked download (ZIP >= 2MB)
+            // Chunked download (ZIP >= 2MB) - decompress and display text preview
             const data = await response.json();
             if (!data.success) {
               throw new Error(data.error);
@@ -1015,25 +1015,58 @@ yarn.lock
             }
             
             progressBar.value = 100;
-            showStatus(`📦 Assembling ${chunks.length} chunks...`, "");
+            showStatus(`📦 Decompressing ZIP archive...`, "");
             
-            // Combine chunks (all are base64)
-            const zipBuffer = Buffer.concat(chunks.map(chunk => Buffer.from(chunk, 'base64')));
-            const blob = new Blob([zipBuffer], { type: 'application/zip' });
-            const filename = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
-            const url = URL.createObjectURL(blob);
+            // Combine base64 chunks and create ZIP blob
+            const base64String = chunks.join('');
+            const binaryString = atob(base64String);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            const zipBlob = new Blob([bytes], { type: 'application/zip' });
+            
+            // Decompress ZIP and extract the text file
+            const JSZip = window.JSZip;
+            const zip = await JSZip.loadAsync(zipBlob);
+            const files = zip.files;
+            
+            // Find the text file (should be repomix_export.txt)
+            let textContent = '';
+            for (const filename in files) {
+              if (filename.endsWith('.txt')) {
+                textContent = await files[filename].async('string');
+                break;
+              }
+            }
+            
+            // Display the extracted text
+            if (textContent) {
+              outputPre.textContent = textContent;
+              outputContainer.style.display = "block";
+            }
+            
+            // Also offer the ZIP download
+            const url = URL.createObjectURL(zipBlob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
+            a.textContent = "📥 Download ZIP Archive";
+            a.style.display = "inline-block";
+            a.style.padding = "10px 20px";
+            a.style.background = "#10b981";
+            a.style.color = "white";
+            a.style.textDecoration = "none";
+            a.style.borderRadius = "12px";
+            a.style.fontWeight = "bold";
+            downloadContainer.innerHTML = "";
+            downloadContainer.appendChild(a);
             
-            const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+            const sizeMB = (zipBlob.size / 1024 / 1024).toFixed(2);
             const textSizeKB = parseFloat(totalSizeSpan.innerText);
-            const compressionRatio = ((1 - blob.size / (textSizeKB * 1024)) * 100).toFixed(1);
-            showStatus(`✅ Downloaded ${sizeMB} MB ZIP (${compressionRatio}% smaller than text!)`, "success");
+            const compressionRatio = ((1 - zipBlob.size / (textSizeKB * 1024)) * 100).toFixed(1);
+            showStatus(`✅ Extracted and displayed ${selectedPaths.length} files! ZIP saved ${compressionRatio}% bandwidth.`, "success");
             progressBar.style.display = "none";
           }
         } catch (err) {
@@ -1179,7 +1212,6 @@ yarn.lock
         showStatus(`Creating ZIP with ${selectedPaths.length} files...`, "");
         progressBar.style.display = "block";
         
-        // For local files, we need to create ZIP client-side
         try {
           const JSZip = window.JSZip;
           const zip = new JSZip();
@@ -1194,7 +1226,6 @@ yarn.lock
           if (includeDirectoryStructure.checked) {
             content += "DIRECTORY STRUCTURE\n";
             content += "-".repeat(80) + "\n";
-            // Build tree from paths
             const paths = selectedPaths;
             const root = {};
             for (const p of paths) {
@@ -1245,20 +1276,31 @@ yarn.lock
           zip.file(`repomix_export_${Date.now()}.txt`, content);
           const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
           
+          // Display preview
+          outputPre.textContent = content;
+          outputContainer.style.display = "block";
+          
+          // Offer download
           const url = URL.createObjectURL(zipBlob);
-          const a = document.createElement("a");
+          const a = document.createElement('a');
           a.href = url;
           a.download = `repomix_${Date.now()}.zip`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
+          a.textContent = "📥 Download ZIP Archive";
+          a.style.display = "inline-block";
+          a.style.padding = "10px 20px";
+          a.style.background = "#10b981";
+          a.style.color = "white";
+          a.style.textDecoration = "none";
+          a.style.borderRadius = "12px";
+          a.style.fontWeight = "bold";
+          downloadContainer.innerHTML = "";
+          downloadContainer.appendChild(a);
           
           const textSizeKB = parseFloat(totalSizeSpan.innerText);
           const zipSizeKB = (zipBlob.size / 1024).toFixed(1);
           const compressionRatio = ((1 - zipBlob.size / (textSizeKB * 1024)) * 100).toFixed(1);
           
-          showStatus(`✅ Downloaded ${zipSizeKB} KB ZIP (${compressionRatio}% smaller than text!)`, "success");
+          showStatus(`✅ Created ${zipSizeKB} KB ZIP (${compressionRatio}% smaller than text!)`, "success");
           progressBar.style.display = "none";
         } catch (err) {
           progressBar.style.display = "none";
@@ -1316,6 +1358,7 @@ yarn.lock
       console.log("🚀 Repomix is ready with ZIP compression!");
       console.log(`📡 Backend URL: ${RENDER_BACKEND_URL}`);
       console.log("✅ Hybrid ZIP: Direct if <2MB, chunked if >=2MB");
+      console.log("✅ Text preview extracted from ZIP");
       console.log("✅ 75-90% file size reduction with ZIP compression");
     </script>
   </body>
