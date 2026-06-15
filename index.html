@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <link rel="icon" type="image/x-icon" href="favicon.ico?v=2">
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Repomix · Smart Repository Packer</title>
@@ -429,11 +430,33 @@
       border-color: #334155;
       margin: 16px 0;
     }
+    .auth-status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #1e293b;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      border: 1px solid #334155;
+      z-index: 1000;
+    }
+    .auth-status.authenticated {
+      border-color: #10b981;
+      color: #10b981;
+    }
+    .auth-status.unauthenticated {
+      border-color: #ef4444;
+      color: #ef4444;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 </head>
 <body>
+<div class="auth-status" id="authStatus" class="unauthenticated">
+  🔐 Unauthenticated
+</div>
 <div class="container">
   <div class="header">
     <h1>📦 Repomix</h1>
@@ -455,6 +478,7 @@
             <button id="analyzeBtn" class="primary">🔍 Analyze Repository</button>
           </div>
           <div class="badge">⚡ 5-repo LRU cache with 7z compression (best for text)</div>
+          <div class="badge">🔐 Authentication required. Use: key('your_secret') in console</div>
         </div>
       </div>
       <div id="localBlock" style="display: none">
@@ -469,14 +493,11 @@
           <input type="file" id="zipUpload" accept=".zip,.ZIP" />
         </div>
       </div>
-
       <hr />
-
       <h2>🚫 Step 2: Ignore Rules</h2>
       <div class="ignore-area">
         <textarea id="ignorePatterns" rows="4" placeholder="node_modules/&#10;.git/&#10;dist/&#10;build/"></textarea>
       </div>
-
       <h2>⚙️ Step 3: Output Options</h2>
       <div class="options-panel">
         <div class="checkbox-group">
@@ -497,7 +518,6 @@
         </div>
       </div>
     </div>
-
     <div class="card">
       <h2>📊 Analysis Results</h2>
       <div id="analysisPanel" style="display: none">
@@ -517,7 +537,6 @@
         </div>
         <div id="analysisDetails" style="font-size: 0.75rem; color: #10b981; text-align: center"></div>
       </div>
-
       <h2>🌲 Step 4: Select Files</h2>
       <div class="file-tree-header">
         <div class="selection-stats" id="selectionStats">📊 0 files selected (0 KB)</div>
@@ -529,7 +548,6 @@
       <div class="file-tree-container" id="fileTreeContainer">
         <div style="color: #64748b; text-align: center; padding: 40px">🔍 Enter a GitHub repo and click "Analyze Repository"</div>
       </div>
-
       <div class="stats-bar">
         <div class="stat">
           <div class="stat-value" id="selectedCount">0</div>
@@ -544,15 +562,12 @@
           <div class="stat-label">Est. ZIP Size (KB)</div>
         </div>
       </div>
-
       <div class="action-buttons">
         <button id="previewBtn" class="success" disabled>📄 Generate & Preview (7z)</button>
         <button id="downloadZipBtn" class="primary download-zip-btn" disabled>📦 Download ZIP</button>
         <button id="resetBtn" class="secondary">⟳ Reset</button>
       </div>
-
       <div id="statusMsg" class="status"></div>
-
       <div id="outputContainer" style="display: none">
         <div class="output-header">
           <h2>📄 Text Preview</h2>
@@ -567,7 +582,6 @@
     </div>
   </div>
 </div>
-
 <script>
 // ========== CONFIGURATION ==========
 const BACKEND_URL = "https://repomix.onrender.com";
@@ -607,6 +621,149 @@ yarn.lock
 *.so
 *.bin
 *.db`;
+
+// ========== AUTHENTICATION SYSTEM ==========
+let passphrase = localStorage.getItem("repomix_pass") || "";
+let currentSessionId = null;
+
+window.key = function(str) {
+  if (str && str.trim()) {
+    passphrase = str.trim();
+    localStorage.setItem("repomix_pass", passphrase);
+    updateAuthStatus();
+    console.log("✅ Authentication key saved!");
+    console.log("🧪 You can now use: test() to check backend status");
+    return "Key saved successfully";
+  }
+  console.log("❌ Please provide a valid key");
+  return "Invalid key";
+};
+
+function updateAuthStatus() {
+  const statusDiv = document.getElementById('authStatus');
+  if (passphrase) {
+    statusDiv.innerHTML = '🔐 Authenticated ✓';
+    statusDiv.className = 'auth-status authenticated';
+  } else {
+    statusDiv.innerHTML = '🔐 Unauthenticated ⚠️';
+    statusDiv.className = 'auth-status unauthenticated';
+  }
+}
+
+// Add auth header to all fetch requests
+function authenticatedFetch(url, options = {}) {
+  const headers = options.headers || {};
+  if (passphrase) {
+    headers['X-Auth-Key'] = passphrase;
+  }
+  return fetch(url, { ...options, headers });
+}
+
+// ========== TEST FUNCTION ==========
+window.test = async function() {
+  if (!passphrase) {
+    console.error("❌ No authentication key set. Use: key('your_secret_key') first");
+    return { error: "No authentication key" };
+  }
+  
+  console.log("🔄 Testing Backend rate limits and sessions...\n");
+  
+  try {
+    const response = await authenticatedFetch(`${BACKEND_URL}/test`, {
+      method: 'GET'
+    });
+    
+    if (!response.ok) {
+      console.error(`❌ Test failed: HTTP ${response.status}`);
+      if (response.status === 401) {
+        console.error("   Unauthorized! Check your authentication key");
+      }
+      return { error: `HTTP ${response.status}` };
+    }
+    
+    const data = await response.json();
+    
+    if (!data.success) {
+      console.error(`❌ Test failed: ${data.error}`);
+      return data;
+    }
+    
+    console.log("📊 TOKEN STATUS:");
+    console.log("-".repeat(80));
+    
+    // Display free tier info
+    console.log(`🌐 FREE TIER: ${data.anonymousFree} remaining requests`);
+    console.log("-".repeat(80));
+    
+    // Display token info
+    const tokenData = data.tokens.filter(t => t.token);
+    if (tokenData.length > 0) {
+      console.table(tokenData.map(t => ({
+        Token: t.token,
+        Status: t.status,
+        Remaining: t.remaining?.toLocaleString() || 'N/A',
+        Limit: t.limit?.toLocaleString() || 'N/A',
+        Used: t.used?.toLocaleString() || 'N/A'
+      })));
+    }
+    
+    // Display session info
+    console.log("\n👥 SESSION MANAGEMENT:");
+    console.log("-".repeat(80));
+    console.log(`Active Sessions: ${data.sessions.activeSessions}/${data.sessions.maxSessions}`);
+    
+    if (data.sessions.sessions && data.sessions.sessions.length > 0) {
+      console.table(data.sessions.sessions.map(s => ({
+        'Session ID': s.id.substring(0, 16) + '...',
+        'Created': s.createdAt,
+        'Last Accessed': s.lastAccessed,
+        'Age (min)': s.ageMinutes
+      })));
+    } else {
+      console.log("No active sessions");
+    }
+    
+    // Display cache info
+    console.log("\n💾 CACHE STATUS:");
+    console.log("-".repeat(80));
+    console.log(`Cache Size: ${data.cacheSize}/5 repositories`);
+    console.log(`Compression: ${data.compression}`);
+    
+    console.log("\n✅ Test completed successfully!");
+    return data;
+    
+  } catch (err) {
+    console.error(`❌ Test failed: ${err.message}`);
+    return { error: err.message };
+  }
+};
+
+// Session viewer
+window.showSessions = async function() {
+  if (!passphrase) {
+    console.error("❌ No authentication key set");
+    return;
+  }
+  
+  try {
+    const response = await authenticatedFetch(`${BACKEND_URL}/test`, {
+      method: 'GET'
+    });
+    
+    const data = await response.json();
+    
+    if (data.sessions && data.sessions.sessions) {
+      console.table(data.sessions.sessions.map(s => ({
+        'Session ID': s.id.substring(0, 16) + '...',
+        'Age (min)': s.ageMinutes,
+        'Last Active': new Date(s.lastAccessed).toLocaleTimeString()
+      })));
+      console.log(`\nTotal: ${data.sessions.activeSessions}/${data.sessions.maxSessions} sessions`);
+    }
+  } catch (err) {
+    console.error(`Failed to get sessions: ${err.message}`);
+  }
+};
 
 // ========== DOM Elements ==========
 const analyzeBtn = document.getElementById("analyzeBtn");
@@ -661,6 +818,7 @@ let isFromCache = false;
 let currentTextContent = "";
 
 ignoreTextarea.value = defaultIgnorePatterns;
+updateAuthStatus();
 
 // ========== Helper Functions ==========
 function formatSize(bytes) {
@@ -704,8 +862,7 @@ function updateSelectionStats() {
   const selectedMetadata = allFilesMetadata.filter(f => selectedFilesSet.has(f.path));
   const totalChars = selectedMetadata.reduce((sum, f) => sum + (f.size || 0), 0);
   const totalKB = (totalChars / 1024).toFixed(1);
-  const estimatedZipKB = (totalChars * 0.22 / 1024).toFixed(1); // ~78% compression with 7z
-  
+  const estimatedZipKB = (totalChars * 0.22 / 1024).toFixed(1);
   selectionStatsSpan.innerHTML = `📊 ${selectedCount} files selected (${totalKB} KB text, ~${estimatedZipKB} KB compressed)`;
   selectedCountSpan.innerText = selectedCount;
   selectedSizeSpan.innerText = totalKB;
@@ -762,7 +919,6 @@ function renderTree(node) {
   const hasChildren = Object.keys(node.children).length > 0 || node.files.length > 0;
   let html = `<div class="tree-node"><div class="tree-item">`;
   html += hasChildren ? `<span class="tree-toggle" data-toggle="${node.path}">${isExpanded ? "▼" : "▶"}</span>` : `<span class="tree-toggle empty"></span>`;
-  
   let allSelected = true;
   for (const file of node.files) if (!selectedFilesSet.has(file.path)) { allSelected = false; break; }
   if (allSelected) {
@@ -773,17 +929,14 @@ function renderTree(node) {
       if (!allSelected) break;
     }
   }
-  
   const isFolderChecked = allSelected && (node.files.length > 0 || Object.keys(node.children).length > 0);
   const selectedSize = node.type === "folder" ? getSelectedFolderSize(node) : (selectedFilesSet.has(node.path) ? node.size || 0 : 0);
   const totalSize = node.type === "folder" ? node.totalSize || 0 : node.size || 0;
   const sizeDisplay = totalSize > 0 ? ` (${formatSize(selectedSize)}/${formatSize(totalSize)})` : "";
-  
   html += `<input type="checkbox" class="tree-checkbox" data-folder="${node.path}" ${isFolderChecked ? "checked" : ""}>`;
   html += `<span class="tree-icon">${hasChildren ? "📁" : "📄"}</span>`;
   html += `<span class="tree-label" data-toggle="${node.path}">${node.name}</span>`;
   html += `<span class="tree-size">${sizeDisplay}</span></div>`;
-  
   if (hasChildren && isExpanded) {
     html += `<div class="folder-content">`;
     for (const childName of Object.keys(node.children).sort()) html += renderTree(node.children[childName]);
@@ -907,349 +1060,7 @@ btnGithub.addEventListener("click", () => setSourceType("github"));
 btnLocal.addEventListener("click", () => setSourceType("local"));
 btnZip.addEventListener("click", () => setSourceType("zip"));
 
-// ========== GITHUB ANALYSIS ==========
-async function analyzeGitHub() {
-  let raw = repoInput.value.trim();
-  if (!raw) {
-    showError("Enter a GitHub repo");
-    return;
-  }
-  const parsed = parseRepoInput(raw);
-  if (!parsed) {
-    showError('Invalid format. Use "owner/repo" or full GitHub URL');
-    return;
-  }
-  currentOwner = parsed.owner;
-  currentRepo = parsed.repo;
-  showStatus(`📊 Analyzing ${currentOwner}/${currentRepo}...`, "");
-  fileTreeContainer.innerHTML = '<div style="color:#64748b; text-align:center; padding:40px;">📊 Analyzing file tree...</div>';
-  outputContainer.style.display = "none";
-  progressBar.style.display = "block";
-  progressBar.value = 20;
-  try {
-    const ignorePatterns = getIgnorePatterns();
-    const response = await fetch(`${BACKEND_URL}/api/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        owner: currentOwner,
-        repo: currentRepo,
-        branch: 'main',
-        ignorePatterns: ignorePatterns
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`Analysis failed: ${response.status}`);
-    }
-    const data = await response.json();
-    if (!data.success) {
-      throw new Error(data.error);
-    }
-    currentRepoId = data.repoId;
-    currentBranch = 'main';
-    isFromCache = data.fromCache || false;
-    allFilesMetadata = Object.entries(data.fileTree).map(([path, size]) => ({ path, size }));
-    totalFilesFoundSpan.innerText = allFilesMetadata.length;
-    totalSizeFoundSpan.innerText = data.totalSizeKB + " KB";
-    cacheStatusSpan.innerText = isFromCache ? "✅ Cached" : "🆕 Fresh";
-    analysisDetailsDiv.innerHTML = `✅ Found ${allFilesMetadata.length} files<br>🔗 Repo ID: ${currentRepoId}<br>${isFromCache ? '💾 Served from cache (instant!)' : '🌐 Fetched from GitHub'}`;
-    analysisPanel.style.display = "block";
-    
-    selectedFilesSet.clear();
-    for (const file of allFilesMetadata) selectedFilesSet.add(file.path);
-    expandedFolders.clear();
-    const fileSizeMap = new Map();
-    for (const [path, size] of Object.entries(data.fileTree)) {
-      fileSizeMap.set(path, size);
-    }
-    fileTreeData = buildFileTreeFromPaths(allFilesMetadata.map(f => f.path), `${currentOwner}_${currentRepo}`, fileSizeMap);
-    expandedFolders.add(fileTreeData.path);
-    refreshTreeDisplay();
-    updateSelectionStats();
-    previewBtn.disabled = false;
-    downloadZipBtn.disabled = false;
-    progressBar.style.display = "none";
-    showStatus(`✅ Analysis complete! ${allFilesMetadata.length} files found.`, "success");
-  } catch (err) {
-    progressBar.style.display = "none";
-    showError(`Analysis failed: ${err.message}`);
-    fileTreeContainer.innerHTML = '<div style="color:#64748b; text-align:center; padding:40px;">❌ Analysis failed. Check repo name.</div>';
-  }
-}
-
-// ========== GENERATE TEXT PREVIEW ==========
-async function generatePreview() {
-  const selectedPaths = Array.from(selectedFilesSet);
-  if (selectedPaths.length === 0) {
-    showError("No files selected");
-    return;
-  }
-  
-  previewBtn.disabled = true;
-  showStatus(`📄 Generating preview for ${selectedPaths.length} files...`, "");
-  progressBar.style.display = "block";
-  progressBar.value = 0;
-  
-  try {
-    const response = await fetch(`${BACKEND_URL}/api/generate-text`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        owner: currentOwner,
-        repo: currentRepo,
-        branch: currentBranch,
-        selectedPaths: selectedPaths,
-        repoId: currentRepoId,
-        includeDirStructure: includeDirectoryStructure.checked,
-        showLineNumbers: showLineNumbers.checked,
-        removeComments: removeComments.checked,
-        removeEmptyLines: removeEmptyLines.checked,
-        chunkIndex: 0,
-        sessionId: null
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Generation failed: ${response.status}`);
-    }
-    
-    const contentType = response.headers.get('content-type');
-    
-    // Direct JSON response
-    if (contentType && contentType.includes('application/json')) {
-      const data = await response.json();
-      if (data.success && data.content) {
-        currentTextContent = data.content;
-        outputPre.textContent = currentTextContent;
-        outputContainer.style.display = "block";
-        progressBar.style.display = "none";
-        showStatus(`✅ Preview ready! ${selectedPaths.length} files.`, "success");
-      } else {
-        throw new Error(data.error || "Failed to generate preview");
-      }
-    } else {
-      // Chunked binary response
-      const totalChunks = parseInt(response.headers.get('X-Total-Chunks'));
-      const totalSize = parseInt(response.headers.get('X-Total-Size'));
-      const sessionId = response.headers.get('X-Session-Id');
-      const hasMore = response.headers.get('X-Has-More') === 'true';
-      
-      const firstChunk = await response.arrayBuffer();
-      const chunks = [new Uint8Array(firstChunk)];
-      
-      if (hasMore) {
-        showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB)...`);
-        
-        for (let i = 1; i < totalChunks; i++) {
-          const chunkResponse = await fetch(`${BACKEND_URL}/api/generate-text`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              owner: currentOwner,
-              repo: currentRepo,
-              branch: currentBranch,
-              selectedPaths: selectedPaths,
-              repoId: currentRepoId,
-              includeDirStructure: includeDirectoryStructure.checked,
-              showLineNumbers: showLineNumbers.checked,
-              removeComments: removeComments.checked,
-              removeEmptyLines: removeEmptyLines.checked,
-              chunkIndex: i,
-              sessionId: sessionId
-            })
-          });
-          
-          const chunkData = await chunkResponse.arrayBuffer();
-          chunks.push(new Uint8Array(chunkData));
-          progressBar.value = (i / totalChunks) * 100;
-        }
-      }
-      
-      progressBar.value = 100;
-      showStatus(`📦 Decompressing archive...`);
-      
-      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const compressedData = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunks) {
-        compressedData.set(chunk, offset);
-        offset += chunk.length;
-      }
-      
-      try {
-        const decompressed = pako.inflate(compressedData, { to: 'string' });
-        currentTextContent = decompressed;
-      } catch(e) {
-        const decoder = new TextDecoder('utf-8');
-        currentTextContent = decoder.decode(compressedData);
-      }
-      
-      outputPre.textContent = currentTextContent;
-      outputContainer.style.display = "block";
-      progressBar.style.display = "none";
-      showStatus(`✅ Preview ready! ${selectedPaths.length} files.`, "success");
-    }
-  } catch (err) {
-    progressBar.style.display = "none";
-    showError(`Generation failed: ${err.message}`);
-    console.error("Generation error:", err);
-  } finally {
-    previewBtn.disabled = false;
-  }
-}
-
-// ========== DOWNLOAD ZIP ==========
-async function downloadZipFile() {
-  const selectedPaths = Array.from(selectedFilesSet);
-  if (selectedPaths.length === 0) {
-    showError("No files selected");
-    return;
-  }
-  
-  downloadZipBtn.disabled = true;
-  showStatus(`📦 Preparing ZIP for ${selectedPaths.length} files...`, "");
-  progressBar.style.display = "block";
-  progressBar.value = 0;
-  
-  try {
-    const response = await fetch(`${BACKEND_URL}/api/generate-zip`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        owner: currentOwner,
-        repo: currentRepo,
-        branch: currentBranch,
-        selectedPaths: selectedPaths,
-        repoId: currentRepoId,
-        includeDirStructure: includeDirectoryStructure.checked,
-        showLineNumbers: showLineNumbers.checked,
-        removeComments: removeComments.checked,
-        removeEmptyLines: removeEmptyLines.checked,
-        chunkIndex: 0,
-        sessionId: null
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Generation failed: ${response.status}`);
-    }
-    
-    const contentType = response.headers.get('content-type');
-    
-    if (contentType && contentType.includes('application/zip')) {
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      
-      const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
-      showStatus(`✅ Downloaded ${sizeMB} MB ZIP file!`, "success");
-      progressBar.style.display = "none";
-      return;
-    }
-    
-    const totalChunks = parseInt(response.headers.get('X-Total-Chunks'));
-    const totalSize = parseInt(response.headers.get('X-Total-Size'));
-    const sessionId = response.headers.get('X-Session-Id');
-    const hasMore = response.headers.get('X-Has-More') === 'true';
-    
-    const firstChunk = await response.arrayBuffer();
-    const chunks = [new Uint8Array(firstChunk)];
-    
-    if (hasMore) {
-      showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`);
-      
-      for (let i = 1; i < totalChunks; i++) {
-        const chunkResponse = await fetch(`${BACKEND_URL}/api/generate-zip`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            owner: currentOwner,
-            repo: currentRepo,
-            branch: currentBranch,
-            selectedPaths: selectedPaths,
-            repoId: currentRepoId,
-            includeDirStructure: includeDirectoryStructure.checked,
-            showLineNumbers: showLineNumbers.checked,
-            removeComments: removeComments.checked,
-            removeEmptyLines: removeEmptyLines.checked,
-            chunkIndex: i,
-            sessionId: sessionId
-          })
-        });
-        
-        const chunkData = await chunkResponse.arrayBuffer();
-        chunks.push(new Uint8Array(chunkData));
-        progressBar.value = (i / totalChunks) * 100;
-      }
-    }
-    
-    progressBar.value = 100;
-    showStatus(`📦 Assembling ZIP file...`);
-    
-    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const zipBytes = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      zipBytes.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    const blob = new Blob([zipBytes], { type: 'application/zip' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    
-    const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
-    showStatus(`✅ Downloaded ${sizeMB} MB ZIP file!`, "success");
-    progressBar.style.display = "none";
-  } catch (err) {
-    progressBar.style.display = "none";
-    showError(`Generation failed: ${err.message}`);
-    console.error("Generation error:", err);
-  } finally {
-    downloadZipBtn.disabled = false;
-  }
-}
-
-// ========== SAVE TEXT FILE ==========
-function downloadAsTextFile() {
-  if (!currentTextContent) {
-    showError("No text content to download");
-    return;
-  }
-  const blob = new Blob([currentTextContent], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `repomix_${currentOwner || 'export'}_${currentRepo || Date.now()}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showStatus(`✅ Downloaded text file (${(blob.size / 1024).toFixed(1)} KB)`, "success");
-}
-
-// ========== LOCAL & ZIP HANDLING ==========
-function shouldIgnore(filePath, patterns) {
-  if (!patterns.length) return false;
-  const lowerPath = filePath.toLowerCase();
-  for (const p of patterns) {
-    if (lowerPath.includes(p)) return true;
-  }
-  return false;
-}
-
+// ========== BINARY DETECTION ==========
 function isBinaryContent(content) {
   if (!content) return true;
   if (content.indexOf("\0") !== -1) return true;
@@ -1258,17 +1069,265 @@ function isBinaryContent(content) {
   return false;
 }
 
+// ========== ENHANCED COMMENT REMOVAL ==========
 function removeCommentsFromCodeLocal(code, filePath) {
   const ext = filePath.split(".").pop()?.toLowerCase();
+  
   if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
   if (ext === "py") {
     return code.replace(/#.*$/gm, "").replace(/'''[\s\S]*?'''/g, "").replace(/"""[\s\S]*?"""/g, "");
   }
-  if (ext === "html") return code.replace(/<!--[\s\S]*?-->/g, "");
-  if (ext === "css") return code.replace(/\/\*[\s\S]*?\*\//g, "");
+  if (["html", "xml", "svg"].includes(ext)) {
+    return code.replace(/<!--[\s\S]*?-->/g, "");
+  }
+  if (["css", "scss", "sass", "less"].includes(ext)) {
+    return code.replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "json") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (["c", "cpp", "h", "hpp", "cc", "cxx"].includes(ext)) {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "java") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "go") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "rs") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "rb") {
+    return code.replace(/#.*$/gm, "").replace(/=begin[\s\S]*?=end/g, "");
+  }
+  if (ext === "php") {
+    return code.replace(/\/\/.*$/gm, "").replace(/#.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "sql") {
+    return code.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "cs") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "swift") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (ext === "kt" || ext === "kts") {
+    return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  }
+  if (["sh", "bash", "zsh", "fish"].includes(ext)) {
+    return code.replace(/#.*$/gm, "");
+  }
+  if (ext === "lua") {
+    return code.replace(/--.*$/gm, "").replace(/--\[\[[\s\S]*?\]\]/g, "");
+  }
+  if (ext === "pl" || ext === "pm") {
+    return code.replace(/#.*$/gm, "");
+  }
   return code;
+}
+
+// ========== ASCII TREE BUILDER ==========
+function buildAsciiTreeLocal(paths, showSizes = false, sizeMap = new Map()) {
+  if (!paths.length) return "(empty)";
+  const root = {};
+  for (const p of paths) {
+    const parts = p.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
+        if (!node._files) node._files = [];
+        node._files.push({ name: part, size: sizeMap.get(p) || 0 });
+      } else {
+        if (!node[part]) node[part] = {};
+        node = node[part];
+      }
+    }
+  }
+  
+  function formatSizeLocal(bytes) {
+    if (bytes === 0) return "";
+    if (bytes < 1024) return ` (${bytes} B)`;
+    if (bytes < 1024 * 1024) return ` (${(bytes / 1024).toFixed(1)} KB)`;
+    return ` (${(bytes / (1024 * 1024)).toFixed(1)} MB)`;
+  }
+  
+  function renderNode(node, prefix = "") {
+    let lines = [];
+    const dirs = Object.keys(node).filter(k => k !== "_files").sort();
+    const files = node._files ? [...node._files].sort((a, b) => a.name.localeCompare(b.name)) : [];
+    const items = [
+      ...dirs.map(d => ({ type: "dir", name: d, size: 0 })),
+      ...files.map(f => ({ type: "file", name: f.name, size: f.size }))
+    ];
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const isLast = i === items.length - 1;
+      const connector = isLast ? "└── " : "├── ";
+      const sizeDisplay = showSizes && item.size > 0 ? formatSizeLocal(item.size) : "";
+      lines.push(`${prefix}${connector}${item.name}${item.type === "dir" ? "/" : ""}${sizeDisplay}`);
+      
+      if (item.type === "dir") {
+        const childPrefix = prefix + (isLast ? "    " : "│   ");
+        const childLines = renderNode(node[item.name], childPrefix);
+        if (childLines) lines.push(childLines);
+      }
+    }
+    return lines.join("\n");
+  }
+  
+  const rootDirs = Object.keys(root).filter(k => k !== "_files").sort();
+  const rootFiles = root._files ? [...root._files].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  const rootItems = [
+    ...rootDirs.map(d => ({ type: "dir", name: d })),
+    ...rootFiles.map(f => ({ type: "file", name: f.name }))
+  ];
+  
+  let result = [];
+  for (let i = 0; i < rootItems.length; i++) {
+    const item = rootItems[i];
+    const isLast = i === rootItems.length - 1;
+    const connector = isLast ? "└── " : "├── ";
+    result.push(`${connector}${item.name}${item.type === "dir" ? "/" : ""}`);
+    if (item.type === "dir") {
+      const childPrefix = isLast ? "    " : "│   ";
+      const childLines = renderNode(root[item.name], childPrefix);
+      if (childLines) result.push(childLines);
+    }
+  }
+  return result.join("\n");
+}
+
+// ========== LOCAL FUNCTIONS ==========
+function generateTextOutputLocal(files) {
+  let output = "";
+  output += "#".repeat(80) + "\n";
+  output += `REPOMIX EXPORT\n`;
+  output += `Source: ${currentSourceType === "local" ? "Local Folder" : "ZIP Archive"}\n`;
+  output += `Generated: ${new Date().toLocaleString()}\n`;
+  output += `Total files: ${files.length}\n`;
+  output += `Total size: ${(files.reduce((s, f) => s + f.content.length, 0) / 1024).toFixed(1)} KB\n`;
+  output += "#".repeat(80) + "\n\n";
+  
+  if (includeDirectoryStructure.checked) {
+    const paths = files.map(f => f.path);
+    const sizeMap = new Map(files.map(f => [f.path, f.content.length]));
+    output += "DIRECTORY STRUCTURE\n";
+    output += "-".repeat(80) + "\n";
+    output += buildAsciiTreeLocal(paths, true, sizeMap) + "\n\n";
+    output += "#".repeat(80) + "\n\n";
+  }
+  
+  for (const file of files) {
+    output += `\n${"#".repeat(80)}\n`;
+    output += `File: ${file.path}\n`;
+    output += `${"#".repeat(80)}\n\n`;
+    let content = file.content;
+    
+    if (removeComments.checked) {
+      content = removeCommentsFromCodeLocal(content, file.path);
+    }
+    if (removeEmptyLines.checked) {
+      content = content.split("\n").filter(l => l.trim().length > 0).join("\n");
+    }
+    if (showLineNumbers.checked) {
+      const lines = content.split("\n");
+      const maxLineNum = lines.length.toString().length;
+      content = lines.map((line, idx) => {
+        const lineNum = (idx + 1).toString().padStart(maxLineNum, " ");
+        return `${lineNum} | ${line}`;
+      }).join("\n");
+    }
+    output += content + "\n";
+  }
+  
+  output += "\n" + "#".repeat(80) + "\n";
+  output += "END OF CODEBASE\n";
+  output += "#".repeat(80) + "\n";
+  return output;
+}
+
+async function fetchSelectedLocalZip() {
+  const selectedPaths = Array.from(selectedFilesSet);
+  if (selectedPaths.length === 0) {
+    showError("No files selected");
+    return;
+  }
+
+  showStatus(`📄 Generating preview for ${selectedPaths.length} local files...`, "");
+  progressBar.style.display = "block";
+  progressBar.value = 0;
+
+  const fetched = [];
+  for (let i = 0; i < selectedPaths.length; i++) {
+    const path = selectedPaths[i];
+    let content = loadedContentMap.get(path) || "";
+    
+    if (removeComments.checked) {
+      content = removeCommentsFromCodeLocal(content, path);
+    }
+    if (removeEmptyLines.checked) {
+      content = content.split("\n").filter(l => l.trim().length > 0).join("\n");
+    }
+    
+    fetched.push({ path, content });
+    progressBar.value = ((i + 1) / selectedPaths.length) * 100;
+    await new Promise(r => setTimeout(r, 10));
+  }
+
+  progressBar.style.display = "none";
+  
+  currentTextContent = generateTextOutputLocal(fetched);
+  outputPre.textContent = currentTextContent;
+  outputContainer.style.display = "block";
+  showStatus(`✅ Preview ready! ${fetched.length} files.`, "success");
+}
+
+async function downloadLocalZip() {
+  const selectedPaths = Array.from(selectedFilesSet);
+  if (selectedPaths.length === 0) {
+    showError("No files selected");
+    return;
+  }
+  
+  showStatus(`📦 Creating ZIP for ${selectedPaths.length} files...`, "");
+  progressBar.style.display = "block";
+  
+  const zip = new JSZip();
+  
+  for (let i = 0; i < selectedPaths.length; i++) {
+    const path = selectedPaths[i];
+    let content = loadedContentMap.get(path) || "";
+    
+    if (removeComments.checked) {
+      content = removeCommentsFromCodeLocal(content, path);
+    }
+    if (removeEmptyLines.checked) {
+      content = content.split("\n").filter(l => l.trim().length > 0).join("\n");
+    }
+    
+    zip.file(path, content);
+    progressBar.value = ((i + 1) / selectedPaths.length) * 100;
+    await new Promise(r => setTimeout(r, 5));
+  }
+  
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `repomix_${currentSourceType}_${Date.now()}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  progressBar.style.display = "none";
+  showStatus(`✅ Downloaded ${(blob.size / 1024).toFixed(1)} KB ZIP file!`, "success");
 }
 
 async function loadLocalFolder() {
@@ -1307,7 +1366,6 @@ async function loadZipArchive() {
   showStatus("Extracting ZIP...", "");
   progressBar.style.display = "block";
   try {
-    const JSZip = window.JSZip;
     const zip = await JSZip.loadAsync(zipFile);
     const allEntries = Object.keys(zip.files);
     const ignorePatterns = getIgnorePatterns();
@@ -1332,6 +1390,15 @@ async function loadZipArchive() {
     progressBar.style.display = "none";
     showError(`ZIP error: ${err.message}`);
   }
+}
+
+function shouldIgnore(filePath, patterns) {
+  if (!patterns.length) return false;
+  const lowerPath = filePath.toLowerCase();
+  for (const p of patterns) {
+    if (lowerPath.includes(p)) return true;
+  }
+  return false;
 }
 
 function processLoadedFiles(filesWithContent, sourceLabel) {
@@ -1360,8 +1427,349 @@ function processLoadedFiles(filesWithContent, sourceLabel) {
   previewBtn.disabled = false;
   downloadZipBtn.disabled = false;
   showStatus(`✅ Ready! ${allFilesMetadata.length} files loaded.`, "success");
+  
+  // Log ASCII tree to console
+  console.log("\n" + "=".repeat(80));
+  console.log(`📁 Source: ${sourceLabel}`);
+  console.log(`📊 Total Files: ${allFilesMetadata.length}`);
+  console.log(`💾 Total Size: ${(totalBytes / 1024).toFixed(1)} KB`);
+  console.log("=".repeat(80));
+  console.log("\n📂 DIRECTORY STRUCTURE:\n");
+  const paths = allFilesMetadata.map(f => f.path);
+  console.log(buildAsciiTreeLocal(paths, true, fileSizeMap));
+  console.log("\n" + "=".repeat(80));
 }
 
+// ========== GITHUB ANALYSIS ==========
+async function analyzeGitHub() {
+  if (!passphrase) {
+    showError("Authentication required! Use key('your_secret') in console first");
+    return;
+  }
+  
+  let raw = repoInput.value.trim();
+  if (!raw) {
+    showError("Enter a GitHub repo");
+    return;
+  }
+  const parsed = parseRepoInput(raw);
+  if (!parsed) {
+    showError('Invalid format. Use "owner/repo" or full GitHub URL');
+    return;
+  }
+  currentOwner = parsed.owner;
+  currentRepo = parsed.repo;
+  showStatus(`📊 Analyzing ${currentOwner}/${currentRepo}...`, "");
+  fileTreeContainer.innerHTML = '<div style="color:#64748b; text-align:center; padding:40px;">📊 Analyzing file tree...</div>';
+  outputContainer.style.display = "none";
+  progressBar.style.display = "block";
+  progressBar.value = 20;
+  try {
+    const ignorePatterns = getIgnorePatterns();
+    const response = await authenticatedFetch(`${BACKEND_URL}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: currentOwner,
+        repo: currentRepo,
+        branch: 'main',
+        ignorePatterns: ignorePatterns,
+        sessionId: currentSessionId
+      })
+    });
+    
+    if (response.status === 401) {
+      throw new Error("Unauthorized! Check your authentication key");
+    }
+    
+    if (!response.ok) {
+      throw new Error(`Analysis failed: ${response.status}`);
+    }
+    const data = await response.json();
+    if (!data.success) {
+      throw new Error(data.error);
+    }
+    currentRepoId = data.repoId;
+    currentBranch = 'main';
+    currentSessionId = data.sessionId;
+    isFromCache = data.fromCache || false;
+    allFilesMetadata = Object.entries(data.fileTree).map(([path, size]) => ({ path, size }));
+    totalFilesFoundSpan.innerText = allFilesMetadata.length;
+    totalSizeFoundSpan.innerText = data.totalSizeKB + " KB";
+    cacheStatusSpan.innerText = isFromCache ? "✅ Cached" : "🆕 Fresh";
+    analysisDetailsDiv.innerHTML = `✅ Found ${allFilesMetadata.length} files<br>🔗 Repo ID: ${currentRepoId}<br>${isFromCache ? '💾 Served from cache (instant!)' : '🌐 Fetched from GitHub'}<br>🔑 Session: ${currentSessionId.substring(0, 16)}...`;
+    analysisPanel.style.display = "block";
+    selectedFilesSet.clear();
+    for (const file of allFilesMetadata) selectedFilesSet.add(file.path);
+    expandedFolders.clear();
+    const fileSizeMap = new Map();
+    for (const [path, size] of Object.entries(data.fileTree)) {
+      fileSizeMap.set(path, size);
+    }
+    fileTreeData = buildFileTreeFromPaths(allFilesMetadata.map(f => f.path), `${currentOwner}_${currentRepo}`, fileSizeMap);
+    expandedFolders.add(fileTreeData.path);
+    refreshTreeDisplay();
+    updateSelectionStats();
+    previewBtn.disabled = false;
+    downloadZipBtn.disabled = false;
+    progressBar.style.display = "none";
+    showStatus(`✅ Analysis complete! ${allFilesMetadata.length} files found.`, "success");
+    
+    // Log ASCII tree to console
+    const totalSizeBytes = allFilesMetadata.reduce((sum, f) => sum + f.size, 0);
+    console.log("\n" + "=".repeat(80));
+    console.log(`📊 Repository: ${currentOwner}/${currentRepo}`);
+    console.log(`📁 Total Files: ${allFilesMetadata.length}`);
+    console.log(`💾 Total Size: ${(totalSizeBytes / 1024).toFixed(1)} KB`);
+    console.log(`🔑 Session: ${currentSessionId}`);
+    console.log("=".repeat(80));
+    console.log("\n📂 DIRECTORY STRUCTURE:\n");
+    const paths = allFilesMetadata.map(f => f.path);
+    console.log(buildAsciiTreeLocal(paths, true, fileSizeMap));
+    console.log("\n" + "=".repeat(80));
+    
+  } catch (err) {
+    progressBar.style.display = "none";
+    showError(`Analysis failed: ${err.message}`);
+    fileTreeContainer.innerHTML = '<div style="color:#64748b; text-align:center; padding:40px;">❌ Analysis failed. Check repo name and authentication.</div>';
+  }
+}
+
+// ========== GITHUB GENERATION FUNCTIONS ==========
+async function generatePreview() {
+  if (!passphrase) {
+    showError("Authentication required! Use key('your_secret') in console first");
+    return;
+  }
+  
+  const selectedPaths = Array.from(selectedFilesSet);
+  if (selectedPaths.length === 0) {
+    showError("No files selected");
+    return;
+  }
+  previewBtn.disabled = true;
+  showStatus(`📄 Generating preview for ${selectedPaths.length} files...`, "");
+  progressBar.style.display = "block";
+  progressBar.value = 0;
+  try {
+    const response = await authenticatedFetch(`${BACKEND_URL}/api/generate-text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: currentOwner,
+        repo: currentRepo,
+        branch: currentBranch,
+        selectedPaths: selectedPaths,
+        repoId: currentRepoId,
+        includeDirStructure: includeDirectoryStructure.checked,
+        showLineNumbers: showLineNumbers.checked,
+        removeComments: removeComments.checked,
+        removeEmptyLines: removeEmptyLines.checked,
+        chunkIndex: 0,
+        sessionId: currentSessionId
+      })
+    });
+    
+    if (response.status === 401) {
+      throw new Error("Unauthorized! Check your authentication key");
+    }
+    
+    if (!response.ok) {
+      throw new Error(`Generation failed: ${response.status}`);
+    }
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      const data = await response.json();
+      if (data.success && data.content) {
+        currentTextContent = data.content;
+        outputPre.textContent = currentTextContent;
+        outputContainer.style.display = "block";
+        progressBar.style.display = "none";
+        showStatus(`✅ Preview ready! ${selectedPaths.length} files.`, "success");
+      } else {
+        throw new Error(data.error || "Failed to generate preview");
+      }
+    } else {
+      const totalChunks = parseInt(response.headers.get('X-Total-Chunks'));
+      const totalSize = parseInt(response.headers.get('X-Total-Size'));
+      const sessionId = response.headers.get('X-Session-Id');
+      const hasMore = response.headers.get('X-Has-More') === 'true';
+      const firstChunk = await response.arrayBuffer();
+      const chunks = [new Uint8Array(firstChunk)];
+      if (hasMore) {
+        showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB)...`);
+        for (let i = 1; i < totalChunks; i++) {
+          const chunkResponse = await authenticatedFetch(`${BACKEND_URL}/api/generate-text`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              owner: currentOwner,
+              repo: currentRepo,
+              branch: currentBranch,
+              selectedPaths: selectedPaths,
+              repoId: currentRepoId,
+              includeDirStructure: includeDirectoryStructure.checked,
+              showLineNumbers: showLineNumbers.checked,
+              removeComments: removeComments.checked,
+              removeEmptyLines: removeEmptyLines.checked,
+              chunkIndex: i,
+              sessionId: sessionId
+            })
+          });
+          const chunkData = await chunkResponse.arrayBuffer();
+          chunks.push(new Uint8Array(chunkData));
+          progressBar.value = (i / totalChunks) * 100;
+        }
+      }
+      progressBar.value = 100;
+      showStatus(`📦 Decompressing archive...`);
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const compressedData = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        compressedData.set(chunk, offset);
+        offset += chunk.length;
+      }
+      try {
+        const decompressed = pako.inflate(compressedData, { to: 'string' });
+        currentTextContent = decompressed;
+      } catch(e) {
+        const decoder = new TextDecoder('utf-8');
+        currentTextContent = decoder.decode(compressedData);
+      }
+      outputPre.textContent = currentTextContent;
+      outputContainer.style.display = "block";
+      progressBar.style.display = "none";
+      showStatus(`✅ Preview ready! ${selectedPaths.length} files.`, "success");
+    }
+  } catch (err) {
+    progressBar.style.display = "none";
+    showError(`Generation failed: ${err.message}`);
+    console.error("Generation error:", err);
+  } finally {
+    previewBtn.disabled = false;
+  }
+}
+
+async function downloadZipFile() {
+  if (!passphrase) {
+    showError("Authentication required! Use key('your_secret') in console first");
+    return;
+  }
+  
+  const selectedPaths = Array.from(selectedFilesSet);
+  if (selectedPaths.length === 0) {
+    showError("No files selected");
+    return;
+  }
+  downloadZipBtn.disabled = true;
+  showStatus(`📦 Preparing ZIP for ${selectedPaths.length} files...`, "");
+  progressBar.style.display = "block";
+  progressBar.value = 0;
+  try {
+    const response = await authenticatedFetch(`${BACKEND_URL}/api/generate-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: currentOwner,
+        repo: currentRepo,
+        branch: currentBranch,
+        selectedPaths: selectedPaths,
+        repoId: currentRepoId,
+        includeDirStructure: includeDirectoryStructure.checked,
+        showLineNumbers: showLineNumbers.checked,
+        removeComments: removeComments.checked,
+        removeEmptyLines: removeEmptyLines.checked,
+        chunkIndex: 0,
+        sessionId: currentSessionId
+      })
+    });
+    
+    if (response.status === 401) {
+      throw new Error("Unauthorized! Check your authentication key");
+    }
+    
+    if (!response.ok) {
+      throw new Error(`Generation failed: ${response.status}`);
+    }
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/zip')) {
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+      showStatus(`✅ Downloaded ${sizeMB} MB ZIP file!`, "success");
+      progressBar.style.display = "none";
+      return;
+    }
+    const totalChunks = parseInt(response.headers.get('X-Total-Chunks'));
+    const totalSize = parseInt(response.headers.get('X-Total-Size'));
+    const sessionId = response.headers.get('X-Session-Id');
+    const hasMore = response.headers.get('X-Has-More') === 'true';
+    const firstChunk = await response.arrayBuffer();
+    const chunks = [new Uint8Array(firstChunk)];
+    if (hasMore) {
+      showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`);
+      for (let i = 1; i < totalChunks; i++) {
+        const chunkResponse = await authenticatedFetch(`${BACKEND_URL}/api/generate-zip`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner: currentOwner,
+            repo: currentRepo,
+            branch: currentBranch,
+            selectedPaths: selectedPaths,
+            repoId: currentRepoId,
+            includeDirStructure: includeDirectoryStructure.checked,
+            showLineNumbers: showLineNumbers.checked,
+            removeComments: removeComments.checked,
+            removeEmptyLines: removeEmptyLines.checked,
+            chunkIndex: i,
+            sessionId: sessionId
+          })
+        });
+        const chunkData = await chunkResponse.arrayBuffer();
+        chunks.push(new Uint8Array(chunkData));
+        progressBar.value = (i / totalChunks) * 100;
+      }
+    }
+    progressBar.value = 100;
+    showStatus(`📦 Assembling ZIP file...`);
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const zipBytes = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      zipBytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    const blob = new Blob([zipBytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+    showStatus(`✅ Downloaded ${sizeMB} MB ZIP file!`, "success");
+    progressBar.style.display = "none";
+  } catch (err) {
+    progressBar.style.display = "none";
+    showError(`Generation failed: ${err.message}`);
+    console.error("Generation error:", err);
+  } finally {
+    downloadZipBtn.disabled = false;
+  }
+}
+
+// ========== MAIN HANDLER ==========
 async function analyzeRepository() {
   if (currentSourceType === "github") {
     await analyzeGitHub();
@@ -1372,9 +1780,26 @@ async function analyzeRepository() {
   }
 }
 
+async function handlePreview() {
+  if (currentSourceType === "github") {
+    await generatePreview();
+  } else {
+    await fetchSelectedLocalZip();
+  }
+}
+
+async function handleDownloadZip() {
+  if (currentSourceType === "github") {
+    await downloadZipFile();
+  } else {
+    await downloadLocalZip();
+  }
+}
+
+// ========== EVENT LISTENERS ==========
 analyzeBtn.addEventListener("click", analyzeRepository);
-previewBtn.addEventListener("click", generatePreview);
-downloadZipBtn.addEventListener("click", downloadZipFile);
+previewBtn.addEventListener("click", handlePreview);
+downloadZipBtn.addEventListener("click", handleDownloadZip);
 folderPicker.addEventListener("change", () => {
   setSourceType("local");
   analyzeRepository();
@@ -1383,9 +1808,22 @@ zipUpload.addEventListener("change", () => {
   setSourceType("zip");
   analyzeRepository();
 });
-
-downloadTextBtn.addEventListener("click", downloadAsTextFile);
-
+downloadTextBtn.addEventListener("click", () => {
+  if (!currentTextContent) {
+    showError("No text content to download");
+    return;
+  }
+  const blob = new Blob([currentTextContent], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `repomix_${currentOwner || 'export'}_${currentRepo || Date.now()}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showStatus(`✅ Downloaded text file (${(blob.size / 1024).toFixed(1)} KB)`, "success");
+});
 copyOutputBtn.addEventListener("click", async () => {
   const outputText = outputPre.textContent;
   try {
@@ -1404,9 +1842,11 @@ copyOutputBtn.addEventListener("click", async () => {
 
 console.log("🚀 Repomix is ready!");
 console.log(`📡 Backend URL: ${BACKEND_URL}`);
-console.log("✅ Generate & Preview - Creates compressed preview");
-console.log("✅ Download ZIP - Downloads compressed ZIP archive");
-console.log("✅ File sizes update dynamically as you select files");
+console.log("🔐 To authenticate, use: key('your_secret_key')");
+console.log("🧪 To test backend, use: test()");
+console.log("👥 To view sessions, use: showSessions()");
+console.log("✅ Local folders and ZIP files work offline");
+console.log("✅ Generate Preview & Download ZIP work with compression");
 </script>
 </body>
 </html>
