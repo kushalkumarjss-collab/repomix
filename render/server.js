@@ -22,18 +22,15 @@ function createSession(sessionId) {
   if (sessions.size >= MAX_SESSIONS) {
     let oldestSessionId = null;
     let oldestTime = Infinity;
-    
     for (const [id, session] of sessions.entries()) {
       if (session.lastAccessed < oldestTime) {
         oldestTime = session.lastAccessed;
         oldestSessionId = id;
       }
     }
-    
     if (oldestSessionId) {
       const oldSession = sessions.get(oldestSessionId);
       console.log(`🗑️ Removing least recent session: ${oldestSessionId} (last accessed: ${new Date(oldSession.lastAccessed).toISOString()})`);
-      
       // Delete entire session folder
       if (fs.existsSync(oldSession.tempDir)) {
         fs.rmSync(oldSession.tempDir, { recursive: true, force: true });
@@ -54,11 +51,9 @@ function createSession(sessionId) {
     lastAccessed: Date.now(),
     tempDir: tempDir
   };
-  
   sessions.set(sessionId, session);
   console.log(`✅ Created session: ${sessionId}`);
   console.log(`📊 Active sessions: ${sessions.size}/${MAX_SESSIONS}`);
-  
   return session;
 }
 
@@ -77,24 +72,20 @@ setInterval(() => {
   const now = Date.now();
   const oneHourAgo = now - (60 * 60 * 1000);
   const toDelete = [];
-  
   for (const [sessionId, session] of sessions.entries()) {
     if (session.createdAt < oneHourAgo) {
       toDelete.push(sessionId);
     }
   }
-  
   for (const sessionId of toDelete) {
     const session = sessions.get(sessionId);
     console.log(`🗑️ Cleaning up old session: ${sessionId} (created ${new Date(session.createdAt).toISOString()})`);
-    
     if (fs.existsSync(session.tempDir)) {
       fs.rmSync(session.tempDir, { recursive: true, force: true });
       console.log(`📁 Deleted folder: ${session.tempDir}`);
     }
     sessions.delete(sessionId);
   }
-  
   if (toDelete.length > 0) {
     console.log(`📊 Active sessions after cleanup: ${sessions.size}/${MAX_SESSIONS}`);
   }
@@ -166,6 +157,7 @@ class RepoCacheEntry {
     this.lastAccessed = Date.now();
     this.accessCount = 1;
   }
+  
   updateAccess() {
     this.accessCount++;
     this.lastAccessed = Date.now();
@@ -212,6 +204,71 @@ function isBinaryContent(content) {
   return false;
 }
 
+// ========== IMPROVED SHOULD IGNORE FUNCTION ==========
+function shouldIgnore(filePath, patterns) {
+  if (!patterns || patterns.length === 0) return false;
+  
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+  
+  for (let pattern of patterns) {
+    let normalizedPattern = pattern.toLowerCase().replace(/\\/g, '/');
+    
+    // Check if it's a folder pattern (original pattern ends with /)
+    const originalPattern = pattern;
+    let isFolderPattern = originalPattern.endsWith('/');
+    
+    // Remove trailing slash if present for matching
+    if (normalizedPattern.endsWith('/')) {
+      normalizedPattern = normalizedPattern.slice(0, -1);
+      isFolderPattern = true;
+    }
+    
+    // Handle wildcard patterns
+    if (normalizedPattern.includes('*')) {
+      const regexPattern = '^' + normalizedPattern.replace(/\*/g, '.*') + '$';
+      const regex = new RegExp(regexPattern);
+      const fileName = normalizedPath.split('/').pop();
+      if (regex.test(fileName)) {
+        console.log(`  Ignored (wildcard): ${filePath} matches ${pattern}`);
+        return true;
+      }
+    }
+    
+    // Check for exact folder match (with or without trailing slash)
+    if (isFolderPattern) {
+      // Check if any path part matches this folder name exactly
+      const pathParts = normalizedPath.split('/');
+      for (const part of pathParts) {
+        if (part === normalizedPattern) {
+          console.log(`  Ignored (folder match): ${filePath} matches ${pattern}`);
+          return true;
+        }
+      }
+      // Also check if path starts with this folder (for nested folders)
+      if (normalizedPath.startsWith(normalizedPattern + '/')) {
+        console.log(`  Ignored (folder prefix): ${filePath} matches ${pattern}`);
+        return true;
+      }
+    } else {
+      // Check for exact file match
+      const fileName = normalizedPath.split('/').pop();
+      if (fileName === normalizedPattern) {
+        console.log(`  Ignored (file match): ${filePath} matches ${pattern}`);
+        return true;
+      }
+      // Check if any folder matches (for patterns without trailing slash)
+      const pathParts = normalizedPath.split('/');
+      for (const part of pathParts) {
+        if (part === normalizedPattern) {
+          console.log(`  Ignored (folder name match): ${filePath} matches ${pattern}`);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 // ========== ENHANCED COMMENT REMOVAL ==========
 function removeCommentsFromCode(code, filePath) {
   const ext = filePath.split(".").pop()?.toLowerCase();
@@ -220,7 +277,6 @@ function removeCommentsFromCode(code, filePath) {
   if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Python
   if (ext === "py") {
     return code
@@ -228,82 +284,66 @@ function removeCommentsFromCode(code, filePath) {
       .replace(/'''[\s\S]*?'''/g, "")
       .replace(/"""[\s\S]*?"""/g, "");
   }
-  
   // HTML/XML
   if (["html", "xml", "svg"].includes(ext)) {
     return code.replace(/<!--[\s\S]*?-->/g, "");
   }
-  
   // CSS/SCSS/SASS
   if (["css", "scss", "sass", "less"].includes(ext)) {
     return code.replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // JSON
   if (ext === "json") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // C/C++
   if (["c", "cpp", "h", "hpp", "cc", "cxx"].includes(ext)) {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Java
   if (ext === "java") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Go
   if (ext === "go") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Rust
   if (ext === "rs") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Ruby
   if (ext === "rb") {
     return code.replace(/#.*$/gm, "").replace(/=begin[\s\S]*?=end/g, "");
   }
-  
   // PHP
   if (ext === "php") {
     return code.replace(/\/\/.*$/gm, "").replace(/#.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // SQL
   if (ext === "sql") {
     return code.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // C#
   if (ext === "cs") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Swift
   if (ext === "swift") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Kotlin
   if (ext === "kt" || ext === "kts") {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
-  
   // Shell scripts
   if (["sh", "bash", "zsh", "fish"].includes(ext)) {
     return code.replace(/#.*$/gm, "");
   }
-  
   // Lua
   if (ext === "lua") {
     return code.replace(/--.*$/gm, "").replace(/--\[\[[\s\S]*?\]\]/g, "");
   }
-  
   // Perl
   if (ext === "pl" || ext === "pm") {
     return code.replace(/#.*$/gm, "");
@@ -354,7 +394,6 @@ function buildAsciiTree(paths, showSizes = false, sizeMap = new Map()) {
       const connector = isLast ? "└── " : "├── ";
       const sizeDisplay = showSizes && item.size > 0 ? formatSize(item.size) : "";
       lines.push(`${prefix}${connector}${item.name}${item.type === "dir" ? "/" : ""}${sizeDisplay}`);
-      
       if (item.type === "dir") {
         const childPrefix = prefix + (isLast ? "    " : "│   ");
         const childLines = renderNode(node[item.name], childPrefix);
@@ -408,8 +447,8 @@ function generateTextContent(files, includeDirStructure, showLineNumbers, remove
     output += `\n${"#".repeat(80)}\n`;
     output += `File: ${filePath}\n`;
     output += `${"#".repeat(80)}\n\n`;
-    let processedContent = content || "";
     
+    let processedContent = content || "";
     if (removeCommentsFlag) {
       processedContent = removeCommentsFromCode(processedContent, filePath);
     }
@@ -442,6 +481,7 @@ async function generateCompressedArchive(textContent, sessionId) {
   
   const tempTextFile = path.join(session.tempDir, `content.txt`);
   const tempArchiveFile = path.join(session.tempDir, `archive.7z`);
+  
   fs.writeFileSync(tempTextFile, textContent, 'utf-8');
   
   if (has7z) {
@@ -464,6 +504,7 @@ async function generateZipArchive(files, options, sizeMap = new Map(), sessionId
     const archiver = require('archiver');
     const chunks = [];
     const archive = archiver('zip', { zlib: { level: 9 } });
+    
     archive.on('data', chunk => chunks.push(chunk));
     archive.on('end', () => resolve(Buffer.concat(chunks)));
     archive.on('error', reject);
@@ -485,6 +526,7 @@ async function generateZipArchive(files, options, sizeMap = new Map(), sessionId
       }
       archive.append(processedContent, { name: filePath });
     }
+    
     archive.finalize();
   });
 }
@@ -503,7 +545,6 @@ app.get('/test', authenticate, async (req, res) => {
           "User-Agent": "Repomix-Backend"
         }
       });
-      
       if (freeResponse.ok) {
         const data = await freeResponse.json();
         results.push({ 
@@ -522,7 +563,6 @@ app.get('/test', authenticate, async (req, res) => {
     for (let i = 0; i < TOKENS.length; i++) {
       const token = TOKENS[i];
       const maskedToken = token.slice(0, 8) + "...." + token.slice(-4);
-      
       try {
         const response = await fetch("https://api.github.com/rate_limit", {
           headers: {
@@ -531,7 +571,6 @@ app.get('/test', authenticate, async (req, res) => {
             "User-Agent": "Repomix-Backend"
           }
         });
-        
         if (!response.ok) {
           results.push({ 
             token: maskedToken, 
@@ -541,7 +580,6 @@ app.get('/test', authenticate, async (req, res) => {
           });
           continue;
         }
-        
         const data = await response.json();
         results.push({
           token: maskedToken,
@@ -580,9 +618,10 @@ app.get('/test', authenticate, async (req, res) => {
   }
 });
 
-// ========== ANALYZE ENDPOINT (with session) ==========
+// ========== ANALYZE ENDPOINT (with ignore patterns) ==========
 app.post('/api/analyze', authenticate, async (req, res) => {
   const { owner, repo, branch = 'main', ignorePatterns = [], sessionId } = req.body;
+  
   if (!owner || !repo) {
     return res.status(400).json({ success: false, error: 'Missing owner or repo' });
   }
@@ -602,28 +641,42 @@ app.post('/api/analyze', authenticate, async (req, res) => {
   }
   
   console.log(`\n📊 Analyzing: ${owner}/${repo} (Session: ${currentSessionId})`);
+  console.log(`🚫 Ignore patterns: ${ignorePatterns.length ? ignorePatterns.join(', ') : 'none'}`);
   
   try {
     const cached = getFromCache(owner, repo, branch);
+    
     if (cached) {
       const filteredTree = {};
       let totalSize = 0;
+      let filteredCount = 0;
+      
+      console.log(`💾 Cache hit, filtering ${Object.keys(cached.fileTree).length} files...`);
+      
       for (const [filePath, size] of Object.entries(cached.fileTree)) {
-        const shouldIgnore = ignorePatterns.some(pattern => 
-          filePath.toLowerCase().includes(pattern.toLowerCase())
-        );
-        if (!shouldIgnore && !isBinaryContent(cached.fileContents[filePath] || "")) {
+        const isBinary = isBinaryContent(cached.fileContents[filePath] || "");
+        const shouldIgnoreFile = shouldIgnore(filePath, ignorePatterns);
+        
+        if (!shouldIgnoreFile && !isBinary) {
           filteredTree[filePath] = size;
           totalSize += size;
+          filteredCount++;
+        } else if (shouldIgnoreFile) {
+          console.log(`  Filtered out (ignore rule): ${filePath}`);
+        } else if (isBinary) {
+          console.log(`  Filtered out (binary): ${filePath}`);
         }
       }
+      
+      console.log(`✅ Filtered ${filteredCount} files from cache (total size: ${(totalSize / 1024).toFixed(1)} KB)`);
+      
       return res.json({
         success: true,
         fromCache: true,
         repoId: cached.repoId,
         fileTree: filteredTree,
         totalSize: totalSize,
-        totalFiles: Object.keys(filteredTree).length,
+        totalFiles: filteredCount,
         totalSizeKB: (totalSize / 1024).toFixed(1),
         sessionId: currentSessionId
       });
@@ -642,6 +695,7 @@ app.post('/api/analyze', authenticate, async (req, res) => {
     const repoInfo = await repoInfoResponse.json();
     const repoId = repoInfo.id;
     const actualBranch = branch === 'main' ? (repoInfo.default_branch || 'main') : branch;
+    
     const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/${actualBranch}`;
     console.log(`⬇️ Downloading: ${zipUrl}`);
     const zipResponse = await fetch(zipUrl, { headers, redirect: 'follow' });
@@ -651,6 +705,7 @@ app.post('/api/analyze', authenticate, async (req, res) => {
     
     const zip = new AdmZip(zipBuffer);
     const entries = zip.getEntries();
+    
     let rootPrefix = '';
     for (const entry of entries) {
       if (entry.entryName.includes('/')) {
@@ -663,13 +718,18 @@ app.post('/api/analyze', authenticate, async (req, res) => {
     const fileContents = {};
     let totalSize = 0;
     
+    console.log(`📂 Processing ${entries.length} entries from ZIP...`);
+    
     for (const entry of entries) {
       if (entry.isDirectory) continue;
+      
       let originalPath = entry.entryName;
       if (originalPath.startsWith(rootPrefix)) originalPath = originalPath.substring(rootPrefix.length);
+      
       const size = entry.header.size;
       fileTree[originalPath] = size;
       totalSize += size;
+      
       try {
         const content = entry.getData().toString('utf-8');
         if (!isBinaryContent(content)) {
@@ -682,19 +742,32 @@ app.post('/api/analyze', authenticate, async (req, res) => {
       }
     }
     
-    addToCache(owner, repo, actualBranch, repoId, fileTree, totalSize, fileContents);
-    
+    // Filter files based on ignore patterns and binary detection
     const filteredTree = {};
     let filteredSize = 0;
+    let filteredCount = 0;
+    
+    console.log(`🔍 Filtering ${Object.keys(fileTree).length} files with patterns:`, ignorePatterns);
+    
     for (const [filePath, size] of Object.entries(fileTree)) {
-      const shouldIgnore = ignorePatterns.some(pattern => 
-        filePath.toLowerCase().includes(pattern.toLowerCase())
-      );
-      if (!shouldIgnore && !isBinaryContent(fileContents[filePath] || "")) {
+      const isBinary = isBinaryContent(fileContents[filePath] || "");
+      const shouldIgnoreFile = shouldIgnore(filePath, ignorePatterns);
+      
+      if (!shouldIgnoreFile && !isBinary) {
         filteredTree[filePath] = size;
         filteredSize += size;
+        filteredCount++;
+      } else if (shouldIgnoreFile) {
+        console.log(`  Filtered out (ignore rule): ${filePath}`);
+      } else if (isBinary) {
+        console.log(`  Filtered out (binary): ${filePath}`);
       }
     }
+    
+    console.log(`✅ Kept ${filteredCount} files (total size: ${(filteredSize / 1024).toFixed(1)} KB)`);
+    
+    // Store everything in cache (including filtered content)
+    addToCache(owner, repo, actualBranch, repoId, fileTree, totalSize, fileContents);
     
     res.json({
       success: true,
@@ -702,7 +775,7 @@ app.post('/api/analyze', authenticate, async (req, res) => {
       repoId: repoId,
       fileTree: filteredTree,
       totalSize: filteredSize,
-      totalFiles: Object.keys(filteredTree).length,
+      totalFiles: filteredCount,
       totalSizeKB: (filteredSize / 1024).toFixed(1),
       sessionId: currentSessionId
     });
@@ -757,6 +830,7 @@ app.post('/api/generate-text', authenticate, async (req, res) => {
   if (chunkIndex === 0) {
     const selectedFiles = {};
     const sizeMap = new Map();
+    
     for (const filePath of selectedPaths) {
       const content = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
       if (!isBinaryContent(content)) {
@@ -772,9 +846,11 @@ app.post('/api/generate-text', authenticate, async (req, res) => {
     console.log(`📦 Generating 7z archive for ${selectedPaths.length} files...`);
     const archiveData = await generateCompressedArchive(textContent, currentSessionId);
     fs.writeFileSync(tempFilePath, archiveData);
+    
     const totalSize = archiveData.length;
     const totalChunks = Math.ceil(totalSize / chunkSize);
     const firstChunk = archiveData.slice(0, chunkSize);
+    
     console.log(`📊 7z Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB, ${totalChunks} chunks`);
     
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -796,6 +872,7 @@ app.post('/api/generate-text', authenticate, async (req, res) => {
   const totalSize = stats.size;
   const totalChunks = Math.ceil(totalSize / chunkSize);
   const start = chunkIndex * chunkSize;
+  
   if (start >= totalSize) {
     fs.unlinkSync(tempFilePath);
     return res.json({ success: true, complete: true });
@@ -806,6 +883,7 @@ app.post('/api/generate-text', authenticate, async (req, res) => {
   const fd = fs.openSync(tempFilePath, 'r');
   fs.readSync(fd, buffer, 0, buffer.length, start);
   fs.closeSync(fd);
+  
   const isLastChunk = (end >= totalSize);
   if (isLastChunk) fs.unlinkSync(tempFilePath);
   
@@ -862,6 +940,7 @@ app.post('/api/generate-zip', authenticate, async (req, res) => {
   if (chunkIndex === 0) {
     const selectedFiles = {};
     const sizeMap = new Map();
+    
     for (const filePath of selectedPaths) {
       const content = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
       if (!isBinaryContent(content)) {
@@ -877,9 +956,11 @@ app.post('/api/generate-zip', authenticate, async (req, res) => {
     console.log(`📦 Generating ZIP archive for ${selectedPaths.length} files...`);
     const archiveData = await generateZipArchive(selectedFiles, options, sizeMap, currentSessionId);
     fs.writeFileSync(tempFilePath, archiveData);
+    
     const totalSize = archiveData.length;
     const totalChunks = Math.ceil(totalSize / chunkSize);
     const firstChunk = archiveData.slice(0, chunkSize);
+    
     console.log(`📊 ZIP Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB, ${totalChunks} chunks`);
     
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -900,6 +981,7 @@ app.post('/api/generate-zip', authenticate, async (req, res) => {
   const totalSize = stats.size;
   const totalChunks = Math.ceil(totalSize / chunkSize);
   const start = chunkIndex * chunkSize;
+  
   if (start >= totalSize) {
     fs.unlinkSync(tempFilePath);
     return res.json({ success: true, complete: true });
@@ -910,6 +992,7 @@ app.post('/api/generate-zip', authenticate, async (req, res) => {
   const fd = fs.openSync(tempFilePath, 'r');
   fs.readSync(fd, buffer, 0, buffer.length, start);
   fs.closeSync(fd);
+  
   const isLastChunk = (end >= totalSize);
   if (isLastChunk) fs.unlinkSync(tempFilePath);
   
@@ -942,5 +1025,5 @@ app.listen(PORT, () => {
   console.log(`📊 Analyze: POST /api/analyze (requires X-Auth-Key header)`);
   console.log(`📄 Text Preview: POST /api/generate-text (requires X-Auth-Key header)`);
   console.log(`📦 ZIP Download: POST /api/generate-zip (requires X-Auth-Key header)`);
-  console.log(`🧪 Test endpoint: GET /test (requires X-Auth-Key header)\n`);
+  console.log(`🧪 Test endpoint: GET /test (requires X-Auth-Key header)`);
 });
