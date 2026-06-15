@@ -269,8 +269,30 @@ async function generateZipArchive(files, options) {
     archive.on('end', () => resolve(Buffer.concat(chunks)));
     archive.on('error', reject);
     
-    let content = generateTextContent(files, options.includeDirStructure, options.showLineNumbers, options.removeComments, options.removeEmptyLines);
-    archive.append(content, { name: `repomix_export.txt` });
+    // Add directory structure file if requested
+    if (options.includeDirStructure) {
+      const filePaths = Object.keys(files);
+      const structure = buildAsciiTree(filePaths);
+      const structureContent = `Directory Structure:\n${'-'.repeat(80)}\n${structure}`;
+      archive.append(structureContent, { name: '_directory_structure.txt' });
+    }
+    
+    // Add each actual file
+    for (const [filePath, content] of Object.entries(files)) {
+      let processedContent = content || "";
+      
+      if (options.removeComments) {
+        processedContent = removeCommentsFromCode(processedContent, filePath);
+      }
+      if (options.removeEmptyLines) {
+        processedContent = processedContent.split("\n")
+          .filter(l => l.trim().length > 0)
+          .join("\n");
+      }
+      
+      archive.append(processedContent, { name: filePath });
+    }
+    
     archive.finalize();
   });
 }
