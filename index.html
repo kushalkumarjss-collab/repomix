@@ -454,9 +454,6 @@
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 </head>
 <body>
-<!--<div class="auth-status" id="authStatus" class="unauthenticated">
-  🔐 Unauthenticated
-</div> -->
 <div class="container">
   <div class="header">
     <h1>📦 Repomix</h1>
@@ -494,7 +491,14 @@
       <hr />
       <h2>🚫 Step 2: Ignore Rules</h2>
       <div class="ignore-area">
-        <textarea id="ignorePatterns" rows="4" placeholder="node_modules/&#10;.git/&#10;dist/&#10;build/"></textarea>
+        <textarea id="ignorePatterns" rows="4" placeholder="node_modules/
+.git/
+dist/
+build/
+*.min.js
+*.log
+.env
+.DS_Store"></textarea>
       </div>
       <h2>⚙️ Step 3: Output Options</h2>
       <div class="options-panel">
@@ -629,24 +633,12 @@ window.key = function(str) {
     passphrase = str.trim();
     localStorage.setItem("repomix_pass", passphrase);
     console.log("✅ Authentication key saved!");
-    console.log("🧪 You can now use: test() to check backend status");
     return "Key saved successfully";
   }
   console.log("❌ Please provide a valid key");
   return "Invalid key";
 };
-/*
-function updateAuthStatus() {
-  const statusDiv = document.getElementById('authStatus');
-  if (passphrase) {
-    statusDiv.innerHTML = '🔐 Authenticated ✓';
-    statusDiv.className = 'auth-status authenticated';
-  } else {
-    statusDiv.innerHTML = '🔐 Unauthenticated ⚠️';
-    statusDiv.className = 'auth-status unauthenticated';
-  }
-}
-*/
+
 // Add auth header to all fetch requests
 function authenticatedFetch(url, options = {}) {
   const headers = options.headers || {};
@@ -662,14 +654,11 @@ window.test = async function() {
     console.error("❌ No authentication key");
     return { error: "No authentication key" };
   }
-  
   console.log("🔄 Testing Backend rate limits and sessions...\n");
-  
   try {
     const response = await authenticatedFetch(`${BACKEND_URL}/test`, {
       method: 'GET'
     });
-    
     if (!response.ok) {
       console.error(`❌ Test failed: HTTP ${response.status}`);
       if (response.status === 401) {
@@ -677,22 +666,15 @@ window.test = async function() {
       }
       return { error: `HTTP ${response.status}` };
     }
-    
     const data = await response.json();
-    
     if (!data.success) {
       console.error(`❌ Test failed: ${data.error}`);
       return data;
     }
-    
     console.log("📊 TOKEN STATUS:");
     console.log("-".repeat(80));
-    
-    // Display free tier info
     console.log(`🌐 FREE TIER: ${data.anonymousFree} remaining requests`);
     console.log("-".repeat(80));
-    
-    // Display token info
     const tokenData = data.tokens.filter(t => t.token);
     if (tokenData.length > 0) {
       console.table(tokenData.map(t => ({
@@ -703,12 +685,9 @@ window.test = async function() {
         Used: t.used?.toLocaleString() || 'N/A'
       })));
     }
-    
-    // Display session info
     console.log("\n👥 SESSION MANAGEMENT:");
     console.log("-".repeat(80));
     console.log(`Active Sessions: ${data.sessions.activeSessions}/${data.sessions.maxSessions}`);
-    
     if (data.sessions.sessions && data.sessions.sessions.length > 0) {
       console.table(data.sessions.sessions.map(s => ({
         'Session ID': s.id.substring(0, 16) + '...',
@@ -719,36 +698,28 @@ window.test = async function() {
     } else {
       console.log("No active sessions");
     }
-    
-    // Display cache info
     console.log("\n💾 CACHE STATUS:");
     console.log("-".repeat(80));
     console.log(`Cache Size: ${data.cacheSize}/5 repositories`);
     console.log(`Compression: ${data.compression}`);
-    
     console.log("\n✅ Test completed successfully!");
     return data;
-    
   } catch (err) {
     console.error(`❌ Test failed: ${err.message}`);
     return { error: err.message };
   }
 };
 
-// Session viewer
 window.sessions = async function() {
   if (!passphrase) {
     console.error("❌ No authentication key set");
     return;
   }
-  
   try {
     const response = await authenticatedFetch(`${BACKEND_URL}/test`, {
       method: 'GET'
     });
-    
     const data = await response.json();
-    
     if (data.sessions && data.sessions.sessions) {
       console.table(data.sessions.sessions.map(s => ({
         'Session ID': s.id.substring(0, 16) + '...',
@@ -850,7 +821,72 @@ function showError(msg) {
 }
 
 function getIgnorePatterns() {
-  return ignoreTextarea.value.split(/\r?\n/).filter(l => l.trim().length > 0).map(p => p.trim().toLowerCase());
+  return ignoreTextarea.value.split(/\r?\n/)
+    .filter(l => l.trim().length > 0)
+    .map(p => p.trim())
+    .filter(p => p.length > 0);
+}
+
+// ========== IMPROVED SHOULD IGNORE FUNCTION ==========
+function shouldIgnore(filePath, patterns) {
+  if (!patterns || patterns.length === 0) return false;
+  
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+  
+  for (let pattern of patterns) {
+    let normalizedPattern = pattern.toLowerCase().replace(/\\/g, '/');
+    
+    // Remove trailing slash if present
+    const originalPattern = pattern;
+    let isFolderPattern = originalPattern.endsWith('/');
+    
+    if (normalizedPattern.endsWith('/')) {
+      normalizedPattern = normalizedPattern.slice(0, -1);
+      isFolderPattern = true;
+    }
+    
+    // Handle wildcard patterns
+    if (normalizedPattern.includes('*')) {
+      const regexPattern = '^' + normalizedPattern.replace(/\*/g, '.*') + '$';
+      const regex = new RegExp(regexPattern);
+      const fileName = normalizedPath.split('/').pop();
+      if (regex.test(fileName)) {
+        console.log(`  Ignored (wildcard): ${filePath} matches ${pattern}`);
+        return true;
+      }
+    }
+    
+    // Check for exact folder match (with or without trailing slash)
+    if (isFolderPattern) {
+      const pathParts = normalizedPath.split('/');
+      for (const part of pathParts) {
+        if (part === normalizedPattern) {
+          console.log(`  Ignored (folder): ${filePath} matches ${pattern}`);
+          return true;
+        }
+      }
+      if (normalizedPath.startsWith(normalizedPattern + '/')) {
+        console.log(`  Ignored (folder prefix): ${filePath} matches ${pattern}`);
+        return true;
+      }
+    } else {
+      // Check for exact file match
+      const fileName = normalizedPath.split('/').pop();
+      if (fileName === normalizedPattern) {
+        console.log(`  Ignored (file): ${filePath} matches ${pattern}`);
+        return true;
+      }
+      // Check if any folder matches
+      const pathParts = normalizedPath.split('/');
+      for (const part of pathParts) {
+        if (part === normalizedPattern) {
+          console.log(`  Ignored (folder name): ${filePath} matches ${pattern}`);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function updateSelectionStats() {
@@ -1068,7 +1104,6 @@ function isBinaryContent(content) {
 // ========== ENHANCED COMMENT REMOVAL ==========
 function removeCommentsFromCodeLocal(code, filePath) {
   const ext = filePath.split(".").pop()?.toLowerCase();
-  
   if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
     return code.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   }
@@ -1144,14 +1179,12 @@ function buildAsciiTreeLocal(paths, showSizes = false, sizeMap = new Map()) {
       }
     }
   }
-  
   function formatSizeLocal(bytes) {
     if (bytes === 0) return "";
     if (bytes < 1024) return ` (${bytes} B)`;
     if (bytes < 1024 * 1024) return ` (${(bytes / 1024).toFixed(1)} KB)`;
     return ` (${(bytes / (1024 * 1024)).toFixed(1)} MB)`;
   }
-  
   function renderNode(node, prefix = "") {
     let lines = [];
     const dirs = Object.keys(node).filter(k => k !== "_files").sort();
@@ -1160,14 +1193,12 @@ function buildAsciiTreeLocal(paths, showSizes = false, sizeMap = new Map()) {
       ...dirs.map(d => ({ type: "dir", name: d, size: 0 })),
       ...files.map(f => ({ type: "file", name: f.name, size: f.size }))
     ];
-    
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const isLast = i === items.length - 1;
       const connector = isLast ? "└── " : "├── ";
       const sizeDisplay = showSizes && item.size > 0 ? formatSizeLocal(item.size) : "";
       lines.push(`${prefix}${connector}${item.name}${item.type === "dir" ? "/" : ""}${sizeDisplay}`);
-      
       if (item.type === "dir") {
         const childPrefix = prefix + (isLast ? "    " : "│   ");
         const childLines = renderNode(node[item.name], childPrefix);
@@ -1176,14 +1207,12 @@ function buildAsciiTreeLocal(paths, showSizes = false, sizeMap = new Map()) {
     }
     return lines.join("\n");
   }
-  
   const rootDirs = Object.keys(root).filter(k => k !== "_files").sort();
   const rootFiles = root._files ? [...root._files].sort((a, b) => a.name.localeCompare(b.name)) : [];
   const rootItems = [
     ...rootDirs.map(d => ({ type: "dir", name: d })),
     ...rootFiles.map(f => ({ type: "file", name: f.name }))
   ];
-  
   let result = [];
   for (let i = 0; i < rootItems.length; i++) {
     const item = rootItems[i];
@@ -1209,7 +1238,6 @@ function generateTextOutputLocal(files) {
   output += `Total files: ${files.length}\n`;
   output += `Total size: ${(files.reduce((s, f) => s + f.content.length, 0) / 1024).toFixed(1)} KB\n`;
   output += "#".repeat(80) + "\n\n";
-  
   if (includeDirectoryStructure.checked) {
     const paths = files.map(f => f.path);
     const sizeMap = new Map(files.map(f => [f.path, f.content.length]));
@@ -1218,13 +1246,11 @@ function generateTextOutputLocal(files) {
     output += buildAsciiTreeLocal(paths, true, sizeMap) + "\n\n";
     output += "#".repeat(80) + "\n\n";
   }
-  
   for (const file of files) {
     output += `\n${"#".repeat(80)}\n`;
     output += `File: ${file.path}\n`;
     output += `${"#".repeat(80)}\n\n`;
     let content = file.content;
-    
     if (removeComments.checked) {
       content = removeCommentsFromCodeLocal(content, file.path);
     }
@@ -1241,7 +1267,6 @@ function generateTextOutputLocal(files) {
     }
     output += content + "\n";
   }
-  
   output += "\n" + "#".repeat(80) + "\n";
   output += "END OF CODEBASE\n";
   output += "#".repeat(80) + "\n";
@@ -1254,30 +1279,24 @@ async function fetchSelectedLocalZip() {
     showError("No files selected");
     return;
   }
-
   showStatus(`📄 Generating preview for ${selectedPaths.length} local files...`, "");
   progressBar.style.display = "block";
   progressBar.value = 0;
-
   const fetched = [];
   for (let i = 0; i < selectedPaths.length; i++) {
     const path = selectedPaths[i];
     let content = loadedContentMap.get(path) || "";
-    
     if (removeComments.checked) {
       content = removeCommentsFromCodeLocal(content, path);
     }
     if (removeEmptyLines.checked) {
       content = content.split("\n").filter(l => l.trim().length > 0).join("\n");
     }
-    
     fetched.push({ path, content });
     progressBar.value = ((i + 1) / selectedPaths.length) * 100;
     await new Promise(r => setTimeout(r, 10));
   }
-
   progressBar.style.display = "none";
-  
   currentTextContent = generateTextOutputLocal(fetched);
   outputPre.textContent = currentTextContent;
   outputContainer.style.display = "block";
@@ -1290,28 +1309,22 @@ async function downloadLocalZip() {
     showError("No files selected");
     return;
   }
-  
   showStatus(`📦 Creating ZIP for ${selectedPaths.length} files...`, "");
   progressBar.style.display = "block";
-  
   const zip = new JSZip();
-  
   for (let i = 0; i < selectedPaths.length; i++) {
     const path = selectedPaths[i];
     let content = loadedContentMap.get(path) || "";
-    
     if (removeComments.checked) {
       content = removeCommentsFromCodeLocal(content, path);
     }
     if (removeEmptyLines.checked) {
       content = content.split("\n").filter(l => l.trim().length > 0).join("\n");
     }
-    
     zip.file(path, content);
     progressBar.value = ((i + 1) / selectedPaths.length) * 100;
     await new Promise(r => setTimeout(r, 5));
   }
-  
   const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1321,11 +1334,11 @@ async function downloadLocalZip() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  
   progressBar.style.display = "none";
   showStatus(`✅ Downloaded ${(blob.size / 1024).toFixed(1)} KB ZIP file!`, "success");
 }
 
+// ========== IMPROVED LOCAL FOLDER LOADING WITH IGNORE PATTERNS ==========
 async function loadLocalFolder() {
   const files = Array.from(folderPicker.files);
   if (!files.length) {
@@ -1336,23 +1349,46 @@ async function loadLocalFolder() {
   progressBar.style.display = "block";
   const results = [];
   const ignorePatterns = getIgnorePatterns();
+  
+  console.log("🔍 Local folder ignore patterns:", ignorePatterns);
+  
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const relPath = file.webkitRelativePath || file.name;
-    if (shouldIgnore(relPath, ignorePatterns)) continue;
+    
+    if (shouldIgnore(relPath, ignorePatterns)) {
+      console.log(`  Ignored: ${relPath}`);
+      progressBar.value = (i / files.length) * 100;
+      continue;
+    }
+    
     try {
       const text = await file.text();
       if (!isBinaryContent(text)) {
         results.push({ path: relPath, content: text, size: text.length });
+        if (results.length % 100 === 0) {
+          console.log(`  Loaded ${results.length} files...`);
+        }
       }
-    } catch(e) {}
+    } catch(e) {
+      console.log(`Error reading ${relPath}: ${e.message}`);
+    }
     progressBar.value = (i / files.length) * 100;
     await new Promise(r => setTimeout(r, 5));
   }
+  
   progressBar.style.display = "none";
+  
+  if (results.length === 0) {
+    showError("No valid text files found. Check your ignore patterns.");
+    return;
+  }
+  
+  console.log(`✅ Loaded ${results.length} files from local folder`);
   processLoadedFiles(results, "local folder");
 }
 
+// ========== IMPROVED ZIP LOADING WITH IGNORE PATTERNS ==========
 async function loadZipArchive() {
   const zipFile = zipUpload.files[0];
   if (!zipFile) {
@@ -1365,36 +1401,57 @@ async function loadZipArchive() {
     const zip = await JSZip.loadAsync(zipFile);
     const allEntries = Object.keys(zip.files);
     const ignorePatterns = getIgnorePatterns();
+    
+    console.log("🔍 ZIP ignore patterns:", ignorePatterns);
+    console.log(`📦 ZIP contains ${allEntries.length} entries`);
+    
     const results = [];
+    let processedCount = 0;
+    
     for (let i = 0; i < allEntries.length; i++) {
       const filePath = allEntries[i];
       const entry = zip.files[filePath];
+      
       if (entry.dir) continue;
-      if (shouldIgnore(filePath, ignorePatterns)) continue;
+      
+      if (shouldIgnore(filePath, ignorePatterns)) {
+        console.log(`  Ignored: ${filePath}`);
+        processedCount++;
+        progressBar.value = (processedCount / allEntries.length) * 100;
+        continue;
+      }
+      
       try {
         const content = await entry.async("string");
         if (!isBinaryContent(content)) {
           results.push({ path: filePath, content: content, size: content.length });
+          if (results.length % 100 === 0) {
+            console.log(`  Loaded ${results.length} files...`);
+          }
         }
-      } catch(e) {}
-      progressBar.value = (i / allEntries.length) * 100;
+      } catch(e) {
+        console.log(`Error reading ${filePath}: ${e.message}`);
+      }
+      
+      processedCount++;
+      progressBar.value = (processedCount / allEntries.length) * 100;
       await new Promise(r => setTimeout(r, 5));
     }
+    
     progressBar.style.display = "none";
+    
+    if (results.length === 0) {
+      showError("No valid text files found in ZIP. Check your ignore patterns.");
+      return;
+    }
+    
+    console.log(`✅ Loaded ${results.length} files from ZIP`);
     processLoadedFiles(results, "ZIP archive");
   } catch (err) {
     progressBar.style.display = "none";
     showError(`ZIP error: ${err.message}`);
+    console.error("ZIP loading error:", err);
   }
-}
-
-function shouldIgnore(filePath, patterns) {
-  if (!patterns.length) return false;
-  const lowerPath = filePath.toLowerCase();
-  for (const p of patterns) {
-    if (lowerPath.includes(p)) return true;
-  }
-  return false;
 }
 
 function processLoadedFiles(filesWithContent, sourceLabel) {
@@ -1402,20 +1459,25 @@ function processLoadedFiles(filesWithContent, sourceLabel) {
     showError("No valid text files found");
     return;
   }
+  
   allFilesMetadata = filesWithContent.map(f => ({ path: f.path, size: f.content.length }));
   loadedContentMap.clear();
   for (const f of filesWithContent) loadedContentMap.set(f.path, f.content);
+  
   selectedFilesSet.clear();
   for (const f of allFilesMetadata) selectedFilesSet.add(f.path);
   expandedFolders.clear();
+  
   const totalBytes = allFilesMetadata.reduce((s, f) => s + f.size, 0);
   totalFilesFoundSpan.innerText = allFilesMetadata.length;
   totalSizeFoundSpan.innerText = (totalBytes / 1024).toFixed(1) + " KB";
   cacheStatusSpan.innerText = "📁 Local";
   analysisDetailsDiv.innerHTML = `✅ Loaded ${allFilesMetadata.length} files from ${sourceLabel}`;
   analysisPanel.style.display = "block";
+  
   const fileSizeMap = new Map();
   for (const f of filesWithContent) fileSizeMap.set(f.path, f.content.length);
+  
   fileTreeData = buildFileTreeFromPaths(allFilesMetadata.map(f => f.path), sourceLabel.replace(/[^a-z0-9]/gi, "_"), fileSizeMap);
   expandedFolders.add(fileTreeData.path);
   refreshTreeDisplay();
@@ -1424,7 +1486,6 @@ function processLoadedFiles(filesWithContent, sourceLabel) {
   downloadZipBtn.disabled = false;
   showStatus(`✅ Ready! ${allFilesMetadata.length} files loaded.`, "success");
   
-  // Log ASCII tree to console
   console.log("\n" + "=".repeat(80));
   console.log(`📁 Source: ${sourceLabel}`);
   console.log(`📊 Total Files: ${allFilesMetadata.length}`);
@@ -1442,7 +1503,6 @@ async function analyzeGitHub() {
     showError("Authentication required! Use key('your_secret') in console first");
     return;
   }
-  
   let raw = repoInput.value.trim();
   if (!raw) {
     showError("Enter a GitHub repo");
@@ -1462,6 +1522,9 @@ async function analyzeGitHub() {
   progressBar.value = 20;
   try {
     const ignorePatterns = getIgnorePatterns();
+    console.log("📤 Sending to server - Owner:", currentOwner, "Repo:", currentRepo);
+    console.log("🚫 Ignore patterns:", ignorePatterns);
+    
     const response = await authenticatedFetch(`${BACKEND_URL}/api/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1477,7 +1540,6 @@ async function analyzeGitHub() {
     if (response.status === 401) {
       throw new Error("Unauthorized! Check your authentication key");
     }
-    
     if (!response.ok) {
       throw new Error(`Analysis failed: ${response.status}`);
     }
@@ -1511,7 +1573,6 @@ async function analyzeGitHub() {
     progressBar.style.display = "none";
     showStatus(`✅ Analysis complete! ${allFilesMetadata.length} files found.`, "success");
     
-    // Log ASCII tree to console
     const totalSizeBytes = allFilesMetadata.reduce((sum, f) => sum + f.size, 0);
     console.log("\n" + "=".repeat(80));
     console.log(`📊 Repository: ${currentOwner}/${currentRepo}`);
@@ -1523,7 +1584,6 @@ async function analyzeGitHub() {
     const paths = allFilesMetadata.map(f => f.path);
     console.log(buildAsciiTreeLocal(paths, true, fileSizeMap));
     console.log("\n" + "=".repeat(80));
-    
   } catch (err) {
     progressBar.style.display = "none";
     showError(`Analysis failed: ${err.message}`);
@@ -1537,7 +1597,6 @@ async function generatePreview() {
     showError("Authentication required! Use key('your_secret') in console first");
     return;
   }
-  
   const selectedPaths = Array.from(selectedFilesSet);
   if (selectedPaths.length === 0) {
     showError("No files selected");
@@ -1565,11 +1624,9 @@ async function generatePreview() {
         sessionId: currentSessionId
       })
     });
-    
     if (response.status === 401) {
       throw new Error("Unauthorized! Check your authentication key");
     }
-    
     if (!response.ok) {
       throw new Error(`Generation failed: ${response.status}`);
     }
@@ -1652,7 +1709,6 @@ async function downloadZipFile() {
     showError("Authentication required! Use key('your_secret') in console first");
     return;
   }
-  
   const selectedPaths = Array.from(selectedFilesSet);
   if (selectedPaths.length === 0) {
     showError("No files selected");
@@ -1680,11 +1736,9 @@ async function downloadZipFile() {
         sessionId: currentSessionId
       })
     });
-    
     if (response.status === 401) {
       throw new Error("Unauthorized! Check your authentication key");
     }
-    
     if (!response.ok) {
       throw new Error(`Generation failed: ${response.status}`);
     }
@@ -1796,14 +1850,17 @@ async function handleDownloadZip() {
 analyzeBtn.addEventListener("click", analyzeRepository);
 previewBtn.addEventListener("click", handlePreview);
 downloadZipBtn.addEventListener("click", handleDownloadZip);
+
 folderPicker.addEventListener("change", () => {
   setSourceType("local");
   analyzeRepository();
 });
+
 zipUpload.addEventListener("change", () => {
   setSourceType("zip");
   analyzeRepository();
 });
+
 downloadTextBtn.addEventListener("click", () => {
   if (!currentTextContent) {
     showError("No text content to download");
@@ -1820,6 +1877,7 @@ downloadTextBtn.addEventListener("click", () => {
   URL.revokeObjectURL(url);
   showStatus(`✅ Downloaded text file (${(blob.size / 1024).toFixed(1)} KB)`, "success");
 });
+
 copyOutputBtn.addEventListener("click", async () => {
   const outputText = outputPre.textContent;
   try {
@@ -1841,6 +1899,7 @@ console.log(`📡 Backend URL: ${BACKEND_URL}`);
 console.log("🔐 To authenticate, use: key('your_secret_key')");
 console.log("🧪 To test backend, use: test()");
 console.log("👥 To view sessions, use: sessions()");
+console.log("📁 Ignore patterns support: node_modules/, *.min.js, .git/, etc.");
 </script>
 </body>
 </html>
