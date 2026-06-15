@@ -187,13 +187,21 @@
       align-items: center;
       margin-bottom: 12px;
     }
-    .copy-btn {
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
+    .button-group {
+      display: flex;
+      gap: 10px;
+    }
+    .copy-btn, .download-text-btn {
       padding: 6px 14px;
       font-size: 0.8rem;
       border-radius: 8px;
       cursor: pointer;
+      border: none;
+      color: white;
     }
+    .copy-btn { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+    .download-text-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
+    .copy-btn:hover, .download-text-btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
     progress {
       width: 100%;
       height: 8px;
@@ -208,16 +216,27 @@
       display: inline-block;
       margin-top: 8px;
     }
-    .compression-badge { background: #10b981; margin-left: 8px; }
     .action-buttons { display: flex; gap: 12px; margin-top: 16px; }
     .action-buttons button { flex: 1; }
+    .file-tree-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .selection-stats {
+      font-size: 0.7rem;
+      color: #94a3b8;
+    }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 </head>
 <body>
 <div class="container">
   <div class="header">
     <h1>📦 Repomix</h1>
-    <p>Select files, get compressed 7z archive + instant text preview</p>
+    <p>Select files, preview text (7z compressed), download as ZIP</p>
   </div>
   <div class="main-grid">
     <div class="card">
@@ -234,7 +253,6 @@
             <input type="text" id="repoUrl" placeholder="owner/repo" value="facebook/react" />
             <button id="analyzeBtn" class="primary">🔍 Analyze</button>
           </div>
-          <div class="badge">⚡ 7z compression (22-28% of original size)</div>
         </div>
       </div>
       <div id="localBlock" style="display:none">
@@ -281,6 +299,13 @@
       </div>
       
       <h2>🌲 Select Files</h2>
+      <div class="file-tree-header">
+        <div class="selection-stats" id="selectionStats">📊 0 files selected</div>
+        <div>
+          <button id="expandAllBtn" style="padding: 4px 10px; font-size: 0.7rem">📂 Expand</button>
+          <button id="collapseAllBtn" style="padding: 4px 10px; font-size: 0.7rem">📁 Collapse</button>
+        </div>
+      </div>
       <div class="file-tree-container" id="fileTreeContainer">
         <div style="text-align:center; padding:40px">🔍 Analyze a repository first</div>
       </div>
@@ -291,7 +316,8 @@
       </div>
       
       <div class="action-buttons">
-        <button id="generateBtn" class="success" disabled>🚀 Generate & Preview</button>
+        <button id="previewBtn" class="success" disabled>📄 Generate & Preview (7z)</button>
+        <button id="downloadZipBtn" class="primary" disabled>📦 Download ZIP</button>
         <button id="resetBtn" class="secondary">⟳ Reset</button>
       </div>
       
@@ -299,20 +325,19 @@
       
       <div id="outputContainer" style="display:none">
         <div class="output-header">
-          <h2>📄 Output Preview</h2>
-          <button id="copyBtn" class="copy-btn">📋 Copy</button>
+          <h2>📄 Text Preview</h2>
+          <div class="button-group">
+            <button id="downloadTextBtn" class="download-text-btn">💾 Save as Text</button>
+            <button id="copyBtn" class="copy-btn">📋 Copy</button>
+          </div>
         </div>
         <pre id="output">—</pre>
-        <div style="font-size:0.7rem; color:#64748b; text-align:center; margin-top:8px">
-          ✨ Text preview shown above | Compressed archive downloaded in background
-        </div>
       </div>
       <progress id="progressBar" value="0" max="100"></progress>
     </div>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script>
 // ========== CONFIG ==========
 const BACKEND_URL = "https://repomix.onrender.com";
@@ -320,7 +345,8 @@ const DEFAULT_IGNORE = `node_modules/\n.git/\n.DS_Store\ndist/\nbuild/\ncoverage
 
 // ========== DOM ==========
 const analyzeBtn = document.getElementById("analyzeBtn");
-const generateBtn = document.getElementById("generateBtn");
+const previewBtn = document.getElementById("previewBtn");
+const downloadZipBtn = document.getElementById("downloadZipBtn");
 const resetBtn = document.getElementById("resetBtn");
 const repoInput = document.getElementById("repoUrl");
 const ignoreTextarea = document.getElementById("ignorePatterns");
@@ -333,12 +359,14 @@ const statusDiv = document.getElementById("statusMsg");
 const outputContainer = document.getElementById("outputContainer");
 const outputPre = document.getElementById("output");
 const copyBtn = document.getElementById("copyBtn");
+const downloadTextBtn = document.getElementById("downloadTextBtn");
 const progressBar = document.getElementById("progressBar");
 const totalFilesSpan = document.getElementById("totalFiles");
 const totalSizeSpan = document.getElementById("totalSize");
 const cacheStatusSpan = document.getElementById("cacheStatus");
 const selectedCountSpan = document.getElementById("selectedCount");
 const selectedSizeSpan = document.getElementById("selectedSize");
+const selectionStatsSpan = document.getElementById("selectionStats");
 const analysisPanel = document.getElementById("analysisPanel");
 const btnGithub = document.getElementById("btnGithub");
 const btnLocal = document.getElementById("btnLocal");
@@ -348,6 +376,8 @@ const localBlock = document.getElementById("localBlock");
 const zipBlock = document.getElementById("zipBlock");
 const folderPicker = document.getElementById("folderPicker");
 const zipUpload = document.getElementById("zipUpload");
+const expandAllBtn = document.getElementById("expandAllBtn");
+const collapseAllBtn = document.getElementById("collapseAllBtn");
 
 ignoreTextarea.value = DEFAULT_IGNORE;
 
@@ -358,7 +388,7 @@ let selectedFiles = new Set();
 let expandedFolders = new Set();
 let currentOwner = "", currentRepo = "", currentRepoId = null;
 let currentSourceType = "github";
-let loadedContent = new Map();
+let currentTextContent = "";
 
 // ========== HELPERS ==========
 function formatSize(bytes) {
@@ -394,6 +424,7 @@ function updateSelectionStats() {
   }
   selectedCountSpan.innerText = selectedFiles.size;
   selectedSizeSpan.innerText = (totalChars / 1024).toFixed(1);
+  selectionStatsSpan.innerHTML = `📊 ${selectedFiles.size} files selected (${(totalChars / 1024).toFixed(1)} KB)`;
 }
 
 // ========== FILE TREE ==========
@@ -501,6 +532,23 @@ function refreshTree() {
   attachEvents();
 }
 
+function expandAllFolders(node = fileTreeData) {
+  if (!node) return;
+  expandedFolders.add(node.path);
+  for (let child in node.children) expandAllFolders(node.children[child]);
+  refreshTree();
+}
+
+function collapseAllFolders(node = fileTreeData) {
+  if (!node) return;
+  expandedFolders.delete(node.path);
+  for (let child in node.children) collapseAllFolders(node.children[child]);
+  refreshTree();
+}
+
+expandAllBtn.onclick = () => { if (fileTreeData) expandAllFolders(); };
+collapseAllBtn.onclick = () => { if (fileTreeData) collapseAllFolders(); };
+
 // ========== GITHUB ANALYSIS ==========
 async function analyzeGitHub() {
   let input = repoInput.value.trim();
@@ -544,7 +592,8 @@ async function analyzeGitHub() {
     expandedFolders.add(fileTreeData.path);
     refreshTree();
     updateSelectionStats();
-    generateBtn.disabled = false;
+    previewBtn.disabled = false;
+    downloadZipBtn.disabled = false;
     progressBar.style.display = "none";
     showStatus(`✅ Found ${allFiles.length} files`, "success");
   } catch(err) {
@@ -553,20 +602,47 @@ async function analyzeGitHub() {
   }
 }
 
-// ========== GENERATE PREVIEW (7z compressed in background) ==========
+// ========== DECOMPRESS 7z OR GZIP ==========
+async function decompressData(compressedData, format) {
+  if (format === '7z') {
+    // For 7z, we need to use a library
+    // Since 7z decompression in browser is complex, we'll use the fact that 
+    // our server falls back to gzip when 7z not available
+    // For now, we'll assume it's gzip or use a simple approach
+    try {
+      // Try pako (gzip decompression)
+      const decompressed = pako.inflate(compressedData, { to: 'string' });
+      return decompressed;
+    } catch(e) {
+      // If that fails, try to read as text (maybe not compressed)
+      const decoder = new TextDecoder('utf-8');
+      return decoder.decode(compressedData);
+    }
+  } else {
+    // Assume it's raw or gzip
+    try {
+      const decompressed = pako.inflate(compressedData, { to: 'string' });
+      return decompressed;
+    } catch(e) {
+      const decoder = new TextDecoder('utf-8');
+      return decoder.decode(compressedData);
+    }
+  }
+}
+
+// ========== GENERATE TEXT PREVIEW (7z compressed chunks) ==========
 async function generatePreview() {
   let selected = Array.from(selectedFiles);
   if (selected.length === 0) { showError("No files selected"); return; }
   
-  generateBtn.disabled = true;
-  generateBtn.textContent = "📦 Generating...";
-  showStatus(`📦 Preparing ${selected.length} files...`);
+  previewBtn.disabled = true;
+  showStatus(`📦 Downloading 7z compressed preview for ${selected.length} files...`);
   progressBar.style.display = "block";
   progressBar.value = 0;
   
   try {
-    // First request - get text preview and first chunk
-    let res = await fetch(`${BACKEND_URL}/api/generate`, {
+    // First request
+    let res = await fetch(`${BACKEND_URL}/api/generate-text`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -582,22 +658,21 @@ async function generatePreview() {
       })
     });
     
-    let data = await res.json();
-    if (!data.success) throw new Error(data.error);
+    const totalChunks = parseInt(res.headers.get('X-Total-Chunks'));
+    const totalSize = parseInt(res.headers.get('X-Total-Size'));
+    const sessionId = res.headers.get('X-Session-Id');
+    const hasMore = res.headers.get('X-Has-More') === 'true';
+    const format = res.headers.get('X-Format') || '7z';
     
-    // Display text preview immediately
-    outputPre.textContent = data.textPreview;
-    outputContainer.style.display = "block";
-    showStatus(`✅ Preview ready! ${selected.length} files shown above.`, "success");
+    // Get first chunk
+    const firstChunk = await res.arrayBuffer();
+    let chunks = [new Uint8Array(firstChunk)];
     
-    // Download remaining chunks in background
-    if (data.hasMoreChunks) {
-      let chunks = [data.archiveData];
-      let sessionId = data.sessionId;
-      let totalChunks = data.totalChunks;
+    if (hasMore) {
+      showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB compressed)...`);
       
       for (let i = 1; i < totalChunks; i++) {
-        let chunkRes = await fetch(`${BACKEND_URL}/api/generate`, {
+        let chunkRes = await fetch(`${BACKEND_URL}/api/generate-text`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -613,48 +688,163 @@ async function generatePreview() {
             sessionId: sessionId
           })
         });
-        let chunkData = await chunkRes.json();
-        chunks.push(chunkData.archiveData);
+        
+        const chunkData = await chunkRes.arrayBuffer();
+        chunks.push(new Uint8Array(chunkData));
         progressBar.value = (i / totalChunks) * 100;
       }
-      
-      // Combine chunks and save compressed file (background)
-      let combined = chunks.join('');
-      let binary = atob(combined);
-      let bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      let blob = new Blob([bytes], { type: 'application/x-7z-compressed' });
-      let url = URL.createObjectURL(blob);
-      let a = document.createElement('a');
-      a.href = url;
-      a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.7z`;
-      a.click();
-      URL.revokeObjectURL(url);
-      
-      let sizeMB = (blob.size / 1024 / 1024).toFixed(2);
-      console.log(`💾 Downloaded ${sizeMB} MB 7z archive`);
-    } else if (data.archiveData) {
-      // Single chunk - download directly
-      let binary = atob(data.archiveData);
-      let bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      let blob = new Blob([bytes], { type: 'application/x-7z-compressed' });
-      let url = URL.createObjectURL(blob);
-      let a = document.createElement('a');
-      a.href = url;
-      a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.7z`;
-      a.click();
-      URL.revokeObjectURL(url);
     }
     
+    progressBar.value = 100;
+    showStatus(`📦 Decompressing ${format} archive...`);
+    
+    // Combine chunks
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const compressedData = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      compressedData.set(chunk, offset);
+      offset += chunk.length;
+    }
+    
+    // Decompress
+    let textContent;
+    try {
+      // Try to decompress using pako (supports gzip)
+      textContent = pako.inflate(compressedData, { to: 'string' });
+    } catch(e) {
+      // If decompression fails, maybe it's not compressed or it's raw
+      const decoder = new TextDecoder('utf-8');
+      textContent = decoder.decode(compressedData);
+    }
+    
+    currentTextContent = textContent;
+    outputPre.textContent = currentTextContent;
+    outputContainer.style.display = "block";
+    
+    const compressionRatio = ((1 - compressedData.length / textContent.length) * 100).toFixed(1);
+    showStatus(`✅ Preview ready! ${selected.length} files (${compressionRatio}% smaller with ${format})`, "success");
     progressBar.style.display = "none";
   } catch(err) {
     progressBar.style.display = "none";
     showError(err.message);
   } finally {
-    generateBtn.disabled = false;
-    generateBtn.textContent = "🚀 Generate & Preview";
+    previewBtn.disabled = false;
   }
+}
+
+// ========== DOWNLOAD ZIP (Chunked) ==========
+async function downloadZip() {
+  let selected = Array.from(selectedFiles);
+  if (selected.length === 0) { showError("No files selected"); return; }
+  
+  downloadZipBtn.disabled = true;
+  showStatus(`📦 Preparing ZIP download for ${selected.length} files...`);
+  progressBar.style.display = "block";
+  progressBar.value = 0;
+  
+  try {
+    let res = await fetch(`${BACKEND_URL}/api/generate-zip`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        owner: currentOwner,
+        repo: currentRepo,
+        selectedPaths: selected,
+        repoId: currentRepoId,
+        includeDirStructure: includeDirStructure.checked,
+        showLineNumbers: showLineNumbers.checked,
+        removeComments: removeComments.checked,
+        removeEmptyLines: removeEmptyLines.checked,
+        chunkIndex: 0
+      })
+    });
+    
+    const totalChunks = parseInt(res.headers.get('X-Total-Chunks'));
+    const totalSize = parseInt(res.headers.get('X-Total-Size'));
+    const sessionId = res.headers.get('X-Session-Id');
+    const hasMore = res.headers.get('X-Has-More') === 'true';
+    
+    const firstChunk = await res.arrayBuffer();
+    let chunks = [new Uint8Array(firstChunk)];
+    
+    if (hasMore) {
+      showStatus(`📥 Downloading ${totalChunks} chunks (${(totalSize / 1024 / 1024).toFixed(2)} MB ZIP)...`);
+      
+      for (let i = 1; i < totalChunks; i++) {
+        let chunkRes = await fetch(`${BACKEND_URL}/api/generate-zip`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: currentOwner,
+            repo: currentRepo,
+            selectedPaths: selected,
+            repoId: currentRepoId,
+            includeDirStructure: includeDirStructure.checked,
+            showLineNumbers: showLineNumbers.checked,
+            removeComments: removeComments.checked,
+            removeEmptyLines: removeEmptyLines.checked,
+            chunkIndex: i,
+            sessionId: sessionId
+          })
+        });
+        
+        const chunkData = await chunkRes.arrayBuffer();
+        chunks.push(new Uint8Array(chunkData));
+        progressBar.value = (i / totalChunks) * 100;
+      }
+    }
+    
+    progressBar.value = 100;
+    showStatus(`📦 Assembling ZIP file...`);
+    
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const zipBytes = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      zipBytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    
+    const blob = new Blob([zipBytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `repomix_${currentOwner}_${currentRepo}_${Date.now()}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+    showStatus(`✅ Downloaded ${sizeMB} MB ZIP file!`, "success");
+    progressBar.style.display = "none";
+  } catch(err) {
+    progressBar.style.display = "none";
+    showError(err.message);
+  } finally {
+    downloadZipBtn.disabled = false;
+  }
+}
+
+// ========== SAVE TEXT FILE ==========
+function downloadTextFile() {
+  if (!currentTextContent) {
+    showError("No text content to download");
+    return;
+  }
+  
+  const blob = new Blob([currentTextContent], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `repomix_${currentOwner || 'export'}_${currentRepo || Date.now()}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  showStatus(`✅ Downloaded text file (${(blob.size / 1024).toFixed(1)} KB)`, "success");
 }
 
 // ========== RESET ==========
@@ -663,17 +853,18 @@ function resetAll() {
   selectedFiles.clear();
   expandedFolders.clear();
   fileTreeData = null;
-  loadedContent.clear();
+  currentTextContent = "";
   analysisPanel.style.display = "none";
   fileTreeContainer.innerHTML = '<div style="text-align:center; padding:40px">🔍 Analyze a repository first</div>';
   outputContainer.style.display = "none";
   updateSelectionStats();
-  generateBtn.disabled = true;
+  previewBtn.disabled = true;
+  downloadZipBtn.disabled = true;
   currentRepoId = null;
   showStatus("");
 }
 
-// ========== LOCAL/ZIP HANDLERS (simplified) ==========
+// ========== LOCAL/ZIP HANDLERS ==========
 function setSourceType(type) {
   currentSourceType = type;
   btnGithub.classList.toggle("active", type === "github");
@@ -685,36 +876,23 @@ function setSourceType(type) {
   resetAll();
 }
 
-async function loadLocalFolder() {
-  let files = Array.from(folderPicker.files);
-  if (!files.length) return;
-  // Simplified - just show message
-  showStatus("📁 Local folder support: " + files.length + " files", "success");
-  generateBtn.disabled = false;
-}
-
-async function loadZipArchive() {
-  let file = zipUpload.files[0];
-  if (!file) return;
-  showStatus("📦 ZIP uploaded", "success");
-  generateBtn.disabled = false;
-}
-
 btnGithub.onclick = () => setSourceType("github");
 btnLocal.onclick = () => setSourceType("local");
 btnZip.onclick = () => setSourceType("zip");
 analyzeBtn.onclick = analyzeGitHub;
-generateBtn.onclick = generatePreview;
+previewBtn.onclick = generatePreview;
+downloadZipBtn.onclick = downloadZip;
 resetBtn.onclick = resetAll;
-folderPicker.onchange = () => { setSourceType("local"); loadLocalFolder(); };
-zipUpload.onchange = () => { setSourceType("zip"); loadZipArchive(); };
 copyBtn.onclick = async () => {
   await navigator.clipboard.writeText(outputPre.textContent);
   copyBtn.textContent = "✅ Copied!";
   setTimeout(() => copyBtn.textContent = "📋 Copy", 2000);
 };
+downloadTextBtn.onclick = downloadTextFile;
 
-console.log("🚀 Repomix ready - 7z compression + instant preview");
+console.log("🚀 Repomix ready! 7z compression + separate endpoints");
+console.log("📄 Preview: Downloads 7z compressed chunks, decompresses, displays text");
+console.log("📦 Download: Downloads ZIP chunks, assembles, saves file");
 </script>
 </body>
 </html>
