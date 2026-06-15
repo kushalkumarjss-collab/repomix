@@ -2,10 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const AdmZip = require('adm-zip');
-const archiver = require('archiver');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 const app = express();
 
 // Middleware
@@ -19,7 +21,21 @@ if (!fs.existsSync(TEMP_DIR)) {
   console.log(`📁 Created temp directory: ${TEMP_DIR}`);
 }
 
-// Clean up old files every hour safely
+// Check if 7z is available
+let has7z = false;
+async function check7z() {
+  try {
+    await execPromise('7z --help');
+    has7z = true;
+    console.log('✅ 7z compression available (better compression than ZIP)');
+  } catch {
+    has7z = false;
+    console.log('⚠️ 7z not found, using fallback method');
+  }
+}
+check7z();
+
+// Clean up old files every hour
 setInterval(() => {
   const now = Date.now();
   const oneHourAgo = now - (60 * 60 * 1000);
@@ -111,7 +127,7 @@ function getFromCache(owner, repo, branch) {
   return null;
 }
 
-// ========== HELPER: Generate Text File Content ==========
+// ========== HELPER: Generate Text Content ==========
 function generateTextFileContent(files, includeDirStructure = true, showLineNumbers = false, removeComments = false, removeEmptyLines = false) {
   let output = "";
   output += "#".repeat(80) + "\n";
@@ -215,7 +231,6 @@ function buildAsciiTree(paths) {
   return result.join("\n");
 }
 
-// ========== FIXED: Proper HTML comment removal ==========
 function removeCommentsFromCode(code, filePath) {
   const ext = filePath.split(".").pop()?.toLowerCase();
   if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) {
@@ -232,63 +247,39 @@ function removeCommentsFromCode(code, filePath) {
   return code;
 }
 
-// ========== HELPER: Generate ZIP Content ==========
-async function generateZipContent(files, options) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    const archive = archiver('zip', { zlib: { level: 9 } });
+// ========== Generate 7z Archive (if available) ==========
+async function generate7zContent(textContent, sessionId) {
+  const tempTextFile = path.join(TEMP_DIR, `${sessionId}.txt`);
+  const temp7zFile = path.join(TEMP_DIR, `${sessionId}.7z`);
+  
+  fs.writeFileSync(tempTextFile, textContent, 'utf-8');
+  
+  if (has7z) {
+    // Use 7z with maximum compression
+    await execPromise(`7z a -t7z -mx=9 -mfb=273 -ms=on "${temp7zFile}" "${tempTextFile}"`);
+    const data = fs.readFileSync(temp7zFile);
     
-    archive.on('data', chunk => chunks.push(chunk));
-    archive.on('end', () => resolve(Buffer.concat(chunks)));
-    archive.on('error', reject);
+    // Clean up
+    fs.unlinkSync(tempTextFile);
+    if (fs.existsSync(temp7zFile)) fs.unlinkSync(temp7zFile);
     
-    // Generate the combined text content
-    let content = '';
-    content += '#'.repeat(80) + '\n';
-    content += `REPOMIX EXPORT\n`;
-    content += `Generated: ${new Date().toLocaleString()}\n`;
-    content += `Total files: ${Object.keys(files).length}\n`;
-    content += `Total size: ${(Object.values(files).reduce((sum, c) => sum + (c ? c.length : 0), 0) / 1024).toFixed(1)} KB\n`;
-    content += '#'.repeat(80) + '\n\n';
-    
-    if (options.includeDirStructure) {
-      const paths = Object.keys(files);
-      content += "DIRECTORY STRUCTURE\n";
-      content += "-".repeat(80) + "\n";
-      content += buildAsciiTree(paths) + "\n\n";
-      content += "#".repeat(80) + "\n\n";
-    }
-    
-    for (const [filePath, fileContent] of Object.entries(files)) {
-      let processedContent = fileContent || "";
-      if (options.removeComments) {
-        processedContent = removeCommentsFromCode(processedContent, filePath);
-      }
-      if (options.removeEmptyLines) {
-        processedContent = processedContent.split("\n").filter(l => l.trim().length > 0).join("\n");
-      }
-      if (options.showLineNumbers) {
-        const lines = processedContent.split("\n");
-        const maxLineNum = Math.max(lines.length, 1).toString().length;
-        processedContent = lines.map((line, idx) => {
-          const lineNum = (idx + 1).toString().padStart(maxLineNum, " ");
-          return `${lineNum} | ${line}`;
-        }).join("\n");
-      }
-      
-      content += `\n${"#".repeat(80)}\n`;
-      content += `File: ${filePath}\n`;
-      content += `${"#".repeat(80)}\n\n`;
-      content += processedContent + "\n";
-    }
-    
-    content += "\n" + "#".repeat(80) + "\n";
-    content += "END OF CODEBASE\n";
-    content += "#".repeat(80) + "\n";
-    
-    archive.append(content, { name: `repomix_export.txt` });
-    archive.finalize();
-  });
+    return data;
+  } else {
+    // Fallback to ZIP if 7z not available
+    const archiver = require('archiver');
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      archive.on('data', chunk => chunks.push(chunk));
+      archive.on('end', () => {
+        fs.unlinkSync(tempTextFile);
+        resolve(Buffer.concat(chunks));
+      });
+      archive.on('error', reject);
+      archive.append(textContent, { name: 'repomix_export.txt' });
+      archive.finalize();
+    });
+  }
 }
 
 // ========== STEP 1: Analyze Repo ==========
@@ -417,8 +408,8 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// ========== STEP 2: Generate ZIP with Binary Hybrid Approach ==========
-app.post('/api/generate-zip', async (req, res) => {
+// ========== STEP 2: Generate Compressed Archive (7z or ZIP) and Send Text Preview ==========
+app.post('/api/generate', async (req, res) => {
   const { 
     owner, repo, branch = 'main', selectedPaths, repoId,
     includeDirStructure = true, showLineNumbers = false,
@@ -438,92 +429,84 @@ app.post('/api/generate-zip', async (req, res) => {
     });
   }
   
-  // Prepare selected files
+  // Prepare selected files and generate text content
   const selectedFiles = {};
   for (const filePath of selectedPaths) {
     selectedFiles[filePath] = cached.fileContents[filePath] || `[File not found: ${filePath}]`;
   }
   
-  const options = { includeDirStructure, showLineNumbers, removeComments, removeEmptyLines };
-  const currentSessionId = sessionId || `${owner}_${repo}_${repoId}_${crypto.randomBytes(4).toString('hex')}`;
+  const textContent = generateTextFileContent(
+    selectedFiles,
+    includeDirStructure,
+    showLineNumbers,
+    removeComments,
+    removeEmptyLines
+  );
   
-  // For first chunk, calculate size and decide delivery method
+  const currentSessionId = sessionId || `${owner}_${repo}_${repoId}_${crypto.randomBytes(4).toString('hex')}`;
+  const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.7z`);
+  const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+  
+  // First chunk - generate archive and send first chunk
   if (chunkIndex === 0) {
-    // Generate ZIP to check size
-    const zipBuffer = await generateZipContent(selectedFiles, options);
-    const zipSizeMB = zipBuffer.length / (1024 * 1024);
+    console.log(`📦 Generating archive for ${selectedPaths.length} files...`);
+    const archiveData = await generate7zContent(textContent, currentSessionId);
+    fs.writeFileSync(tempFilePath, archiveData);
     
-    console.log(`📊 ZIP Size: ${zipSizeMB.toFixed(2)} MB`);
+    const totalSize = archiveData.length;
+    const totalChunks = Math.ceil(totalSize / chunkSize);
+    const firstChunk = archiveData.slice(0, chunkSize);
     
-    // If ZIP is less than 2MB, send directly as binary download
-    if (zipBuffer.length < 2 * 1024 * 1024) {
-      console.log(`✅ Direct ZIP download (${zipSizeMB.toFixed(2)} MB < 2MB threshold)`);
-      const filename = `repomix_${owner}_${repo}_${Date.now()}.zip`;
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Length', zipBuffer.length);
-      return res.send(zipBuffer);
-    }
+    console.log(`📊 Archive size: ${(totalSize / 1024 / 1024).toFixed(2)} MB, ${totalChunks} chunks`);
     
-    // Otherwise, start chunked session - store binary file
-    console.log(`📦 Starting chunked binary session (${zipSizeMB.toFixed(2)} MB > 2MB threshold)`);
-    const tempFilePath = path.join(TEMP_DIR, `${currentSessionId}.zip`);
-    fs.writeFileSync(tempFilePath, zipBuffer);
-    
-    // Return first chunk as raw binary with metadata in headers
-    const chunkSize = 2 * 1024 * 1024; // 2MB chunks
-    const totalChunks = Math.ceil(zipBuffer.length / chunkSize);
-    const firstChunk = zipBuffer.slice(0, chunkSize);
-    
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('X-Chunk-Index', '0');
-    res.setHeader('X-Total-Chunks', totalChunks);
-    res.setHeader('X-Total-Size', zipBuffer.length);
-    res.setHeader('X-Session-Id', currentSessionId);
-    res.setHeader('X-Is-Chunked', 'true');
-    res.setHeader('X-Complete', 'false');
-    res.send(firstChunk);
+    // Also send the text preview in the same response
+    res.json({
+      success: true,
+      textPreview: textContent,  // Send text preview for display
+      archiveData: firstChunk.toString('base64'),  // Send first chunk as base64
+      archiveFormat: has7z ? '7z' : 'zip',
+      totalChunks: totalChunks,
+      totalSize: totalSize,
+      chunkIndex: 0,
+      sessionId: currentSessionId,
+      hasMoreChunks: totalChunks > 1
+    });
     return;
   }
   
-  // Handle subsequent chunks - send as raw binary
-  const tempFilePath = path.join(TEMP_DIR, `${sessionId}.zip`);
+  // Subsequent chunks
   if (!fs.existsSync(tempFilePath)) {
-    return res.status(400).json({ success: false, error: 'Session expired. Start from chunk 0.' });
+    return res.status(400).json({ success: false, error: 'Session expired' });
   }
   
   const stats = fs.statSync(tempFilePath);
   const totalSize = stats.size;
-  const chunkSize = 2 * 1024 * 1024;
   const totalChunks = Math.ceil(totalSize / chunkSize);
   const start = chunkIndex * chunkSize;
   
   if (start >= totalSize) {
-    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-    res.setHeader('Content-Type', 'application/json');
+    fs.unlinkSync(tempFilePath);
     return res.json({ success: true, complete: true });
   }
   
   const end = Math.min(start + chunkSize, totalSize);
-  const bufferLength = end - start;
-  const buffer = Buffer.alloc(bufferLength);
+  const buffer = Buffer.alloc(end - start);
   const fd = fs.openSync(tempFilePath, 'r');
-  fs.readSync(fd, buffer, 0, bufferLength, start);
+  fs.readSync(fd, buffer, 0, buffer.length, start);
   fs.closeSync(fd);
   
   const isLastChunk = (end >= totalSize);
   if (isLastChunk) {
     fs.unlinkSync(tempFilePath);
-    console.log(`🗑️ Deleted: ${path.basename(tempFilePath)}`);
   }
   
-  // Send raw binary chunk with metadata in headers
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('X-Chunk-Index', chunkIndex);
-  res.setHeader('X-Total-Chunks', totalChunks);
-  res.setHeader('X-Total-Size', totalSize);
-  res.setHeader('X-Complete', isLastChunk ? 'true' : 'false');
-  res.send(buffer);
+  res.json({
+    success: true,
+    archiveData: buffer.toString('base64'),
+    chunkIndex: chunkIndex,
+    totalChunks: totalChunks,
+    hasMoreChunks: !isLastChunk
+  });
 });
 
 // Health check endpoint
@@ -531,8 +514,9 @@ app.get('/health', (req, res) => {
   const tempFiles = fs.readdirSync(TEMP_DIR).length;
   res.json({ 
     status: 'alive', 
-    service: 'repomix-backend-v3',
+    service: 'repomix-backend-v4',
     timestamp: new Date().toISOString(),
+    compression: has7z ? '7z' : 'zip',
     tokensConfigured: TOKENS.length,
     cacheSize: repoCache.size,
     tempFiles: tempFiles
@@ -554,51 +538,27 @@ app.get('/api/cache/stats', (req, res) => {
   res.json({ cacheSize: repoCache.size, maxSize: MAX_CACHE_SIZE, entries: stats });
 });
 
-// ========== GRACEFUL SHUTDOWN CLEANUP ==========
+// Cleanup
 function cleanupTempFiles() {
   console.log('🧹 Cleaning up temporary files...');
   try {
     const files = fs.readdirSync(TEMP_DIR);
-    let deletedCount = 0;
     files.forEach(file => {
-      const filePath = path.join(TEMP_DIR, file);
-      try {
-        fs.unlinkSync(filePath);
-        deletedCount++;
-      } catch (err) {
-        console.error(`Failed to delete ${file}:`, err.message);
-      }
+      try { fs.unlinkSync(path.join(TEMP_DIR, file)); } catch(e) {}
     });
-    console.log(`✅ Deleted ${deletedCount} temporary file(s)`);
-  } catch (err) {
-    console.error('Cleanup error:', err.message);
-  }
+    console.log(`✅ Cleaned up ${files.length} files`);
+  } catch(e) {}
 }
 
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received. Cleaning up...');
-  cleanupTempFiles();
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received. Cleaning up...');
-  cleanupTempFiles();
-  process.exit(0);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('💥 Uncaught exception:', err);
-  cleanupTempFiles();
-  process.exit(1);
-});
+process.on('SIGTERM', () => { cleanupTempFiles(); process.exit(0); });
+process.on('SIGINT', () => { cleanupTempFiles(); process.exit(0); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Repomix Backend running on port ${PORT}`);
   console.log(`🔧 Health: http://localhost:${PORT}/health`);
   console.log(`📊 Analyze: POST /api/analyze`);
-  console.log(`📦 Generate ZIP: POST /api/generate-zip (binary hybrid: direct if <2MB, else raw binary chunks)`);
+  console.log(`📦 Generate: POST /api/generate (7z compressed + text preview)`);
   console.log(`💾 Cache: ${MAX_CACHE_SIZE} repos (LRU)`);
   console.log(`📁 Temp: ${TEMP_DIR}`);
   console.log(`🔑 Tokens: ${TOKENS.length}\n`);
